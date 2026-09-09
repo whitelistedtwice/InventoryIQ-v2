@@ -7,10 +7,12 @@ from analysis import (
     TrendResult,
     OutlierResult,
     InventoryPlanningResult,
+    FinancialMetrics,
     calculate_demand_statistics,
     calculate_trend,
     detect_outliers,
     calculate_inventory_planning,
+    calculate_financial_and_excess_metrics,
 )
 
 
@@ -428,4 +430,196 @@ def test_inventory_planning_missing_inventory_nan():
     assert result.days_remaining is None
     assert result.reorder_quantity is None
     assert any("Missing current inventory" in warning for warning in result.warnings)
+
+
+def test_financial_known_values():
+    from scipy.stats import norm
+    z = float(norm.ppf(0.95))
+    mean_demand = 10.0
+    std_dev = 3.0
+    lead_time_days = 7.0
+    safety_stock = z * std_dev * np.sqrt(lead_time_days)
+    target_stock = mean_demand * 30.0 + safety_stock
+
+    result = calculate_financial_and_excess_metrics(
+        mean_demand=mean_demand,
+        std_dev=std_dev,
+        current_inventory=350.0,
+        unit_cost=6.0,
+        selling_price=10.0,
+        lead_time_days=lead_time_days,
+        planning_horizon=30.0,
+        units_sold=20.0,
+    )
+    assert result.daily_revenue == pytest.approx(200.0)
+    assert result.daily_cogs == pytest.approx(120.0)
+    assert result.daily_profit == pytest.approx(80.0)
+    assert result.profit_per_unit == pytest.approx(4.0)
+    assert result.gross_margin == pytest.approx(0.4)
+    assert result.inventory_value == pytest.approx(2100.0)
+    assert result.capital_tied_up == pytest.approx(2100.0)
+    assert result.target_stock == pytest.approx(target_stock)
+    assert result.excess_units == pytest.approx(max(0.0, 350.0 - target_stock))
+    assert result.excess_inventory_value == pytest.approx(max(0.0, 350.0 - target_stock) * 6.0)
+    assert result.planning_horizon == pytest.approx(30.0)
+    assert result.shortage_units == pytest.approx(max(0.0, mean_demand * lead_time_days - 350.0))
+    assert result.revenue_at_risk == pytest.approx(max(0.0, mean_demand * lead_time_days - 350.0) * 10.0)
+    assert result.profit_at_risk == pytest.approx(max(0.0, mean_demand * lead_time_days - 350.0) * 4.0)
+
+
+def test_financial_target_stock_not_rop():
+    mean_demand = 10.0
+    std_dev = 3.0
+    lead_time_days = 7.0
+    planning_horizon = 30.0
+
+    planning = calculate_inventory_planning(
+        mean_demand=mean_demand,
+        std_dev=std_dev,
+        current_inventory=60.0,
+        lead_time_days=lead_time_days,
+    )
+    result = calculate_financial_and_excess_metrics(
+        mean_demand=mean_demand,
+        std_dev=std_dev,
+        current_inventory=60.0,
+        unit_cost=6.0,
+        selling_price=10.0,
+        lead_time_days=lead_time_days,
+        planning_horizon=planning_horizon,
+    )
+    assert result.target_stock != planning.reorder_point
+    assert result.target_stock == pytest.approx(mean_demand * planning_horizon + planning.safety_stock)
+    assert planning.reorder_point == pytest.approx(mean_demand * lead_time_days + planning.safety_stock)
+
+
+def test_financial_zero_revenue_margin():
+    result = calculate_financial_and_excess_metrics(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=100.0,
+        unit_cost=5.0,
+        selling_price=0.0,
+        lead_time_days=7.0,
+        units_sold=10.0,
+    )
+    assert result.daily_revenue == pytest.approx(0.0)
+    assert result.daily_profit == pytest.approx(-50.0)
+    assert result.gross_margin == pytest.approx(0.0)
+    assert result.profit_per_unit == pytest.approx(-5.0)
+
+
+def test_financial_negative_margin_preserved():
+    result = calculate_financial_and_excess_metrics(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=100.0,
+        unit_cost=8.0,
+        selling_price=5.0,
+        lead_time_days=7.0,
+        units_sold=10.0,
+    )
+    assert result.daily_revenue == pytest.approx(50.0)
+    assert result.daily_cogs == pytest.approx(80.0)
+    assert result.daily_profit == pytest.approx(-30.0)
+    assert result.profit_per_unit == pytest.approx(-3.0)
+    assert result.gross_margin == pytest.approx(-0.6)
+
+
+def test_financial_missing_inventory():
+    result = calculate_financial_and_excess_metrics(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=None,
+        unit_cost=5.0,
+        selling_price=10.0,
+        lead_time_days=7.0,
+        units_sold=10.0,
+    )
+    assert result.daily_revenue == pytest.approx(100.0)
+    assert result.daily_cogs == pytest.approx(50.0)
+    assert result.daily_profit == pytest.approx(50.0)
+    assert result.inventory_value is None
+    assert result.capital_tied_up is None
+    assert result.excess_units is None
+    assert result.excess_inventory_value is None
+    assert any("Missing current inventory" in warning for warning in result.warnings)
+
+
+def test_financial_zero_demand():
+    result = calculate_financial_and_excess_metrics(
+        mean_demand=0.0,
+        std_dev=0.0,
+        current_inventory=100.0,
+        unit_cost=5.0,
+        selling_price=10.0,
+        lead_time_days=7.0,
+        units_sold=0.0,
+    )
+    assert result.daily_revenue == pytest.approx(0.0)
+    assert result.daily_cogs == pytest.approx(0.0)
+    assert result.daily_profit == pytest.approx(0.0)
+    assert result.shortage_units == pytest.approx(0.0)
+    assert result.revenue_at_risk == pytest.approx(0.0)
+    assert result.profit_at_risk == pytest.approx(0.0)
+
+
+def test_financial_configurable_planning_horizon():
+    result_30 = calculate_financial_and_excess_metrics(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=100.0,
+        unit_cost=5.0,
+        selling_price=10.0,
+        lead_time_days=7.0,
+        planning_horizon=30.0,
+    )
+    result_60 = calculate_financial_and_excess_metrics(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=100.0,
+        unit_cost=5.0,
+        selling_price=10.0,
+        lead_time_days=7.0,
+        planning_horizon=60.0,
+    )
+    assert result_30.planning_horizon == pytest.approx(30.0)
+    assert result_60.planning_horizon == pytest.approx(60.0)
+    assert result_60.target_stock > result_30.target_stock
+    assert result_60.target_stock == pytest.approx(result_30.target_stock + 10.0 * 30.0)
+
+
+def test_financial_no_units_sold():
+    result = calculate_financial_and_excess_metrics(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=100.0,
+        unit_cost=5.0,
+        selling_price=10.0,
+        lead_time_days=7.0,
+    )
+    assert result.daily_revenue is None
+    assert result.daily_cogs is None
+    assert result.daily_profit is None
+    assert result.gross_margin is None
+    assert result.profit_per_unit == pytest.approx(5.0)
+    assert result.inventory_value == pytest.approx(500.0)
+    assert result.capital_tied_up == pytest.approx(500.0)
+
+
+def test_financial_invalid_lead_time():
+    result = calculate_financial_and_excess_metrics(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=100.0,
+        unit_cost=5.0,
+        selling_price=10.0,
+        lead_time_days=None,
+    )
+    assert result.shortage_units is None
+    assert result.revenue_at_risk is None
+    assert result.profit_at_risk is None
+    assert result.target_stock is None
+    assert result.excess_units is None
+    assert any("Invalid or unavailable lead time" in warning for warning in result.warnings)
 

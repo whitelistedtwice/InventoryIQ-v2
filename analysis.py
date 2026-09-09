@@ -269,3 +269,113 @@ def calculate_inventory_planning(
         z_score=z_score,
         warnings=warnings,
     )
+
+
+@dataclass
+class FinancialMetrics:
+    daily_revenue: Optional[float] = None
+    daily_cogs: Optional[float] = None
+    daily_profit: Optional[float] = None
+    profit_per_unit: Optional[float] = None
+    gross_margin: Optional[float] = None
+    inventory_value: Optional[float] = None
+    capital_tied_up: Optional[float] = None
+    shortage_units: Optional[float] = None
+    revenue_at_risk: Optional[float] = None
+    profit_at_risk: Optional[float] = None
+    target_stock: Optional[float] = None
+    excess_units: Optional[float] = None
+    excess_inventory_value: Optional[float] = None
+    planning_horizon: float = 30.0
+    warnings: List[str] = field(default_factory=list)
+
+
+def calculate_financial_and_excess_metrics(
+    mean_demand: float,
+    std_dev: float,
+    current_inventory: Optional[float],
+    unit_cost: float,
+    selling_price: float,
+    lead_time_days: Optional[float],
+    planning_horizon: float = 30.0,
+    service_level: float = 0.95,
+    units_sold: Optional[float] = None,
+) -> FinancialMetrics:
+    warnings: List[str] = []
+
+    if units_sold is not None:
+        daily_revenue = units_sold * selling_price
+        daily_cogs = units_sold * unit_cost
+        daily_profit = daily_revenue - daily_cogs
+        profit_per_unit = selling_price - unit_cost
+        if daily_revenue > 0:
+            gross_margin = daily_profit / daily_revenue
+        else:
+            gross_margin = 0.0
+            if units_sold > 0:
+                warnings.append("Zero revenue; gross margin set to 0.")
+    else:
+        daily_revenue = None
+        daily_cogs = None
+        daily_profit = None
+        profit_per_unit = selling_price - unit_cost
+        gross_margin = None
+
+    if current_inventory is None or np.isnan(current_inventory):
+        inventory_value = None
+        capital_tied_up = None
+        excess_units = None
+        excess_inventory_value = None
+        warnings.append("Missing current inventory; inventory value, capital tied up, and excess metrics unavailable.")
+    else:
+        inventory_value = current_inventory * unit_cost
+        capital_tied_up = current_inventory * unit_cost
+
+    planning = calculate_inventory_planning(
+        mean_demand=mean_demand,
+        std_dev=std_dev,
+        current_inventory=current_inventory,
+        lead_time_days=lead_time_days,
+        service_level=service_level,
+    )
+    warnings.extend(planning.warnings)
+
+    shortage_units = max(0.0, planning.lead_time_demand - (current_inventory or 0.0)) if planning.lead_time_demand is not None else None
+
+    if shortage_units is not None:
+        revenue_at_risk = shortage_units * selling_price
+        profit_at_risk = shortage_units * (selling_price - unit_cost)
+    else:
+        revenue_at_risk = None
+        profit_at_risk = None
+
+    if planning.safety_stock is not None:
+        target_stock = mean_demand * planning_horizon + planning.safety_stock
+        if current_inventory is not None and not np.isnan(current_inventory):
+            excess_units = max(0.0, current_inventory - target_stock)
+            excess_inventory_value = excess_units * unit_cost
+        else:
+            excess_units = None
+            excess_inventory_value = None
+    else:
+        target_stock = None
+        excess_units = None
+        excess_inventory_value = None
+
+    return FinancialMetrics(
+        daily_revenue=daily_revenue,
+        daily_cogs=daily_cogs,
+        daily_profit=daily_profit,
+        profit_per_unit=profit_per_unit,
+        gross_margin=gross_margin,
+        inventory_value=inventory_value,
+        capital_tied_up=capital_tied_up,
+        shortage_units=shortage_units,
+        revenue_at_risk=revenue_at_risk,
+        profit_at_risk=profit_at_risk,
+        target_stock=target_stock,
+        excess_units=excess_units,
+        excess_inventory_value=excess_inventory_value,
+        planning_horizon=planning_horizon,
+        warnings=warnings,
+    )
