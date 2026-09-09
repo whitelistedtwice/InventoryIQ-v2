@@ -6,9 +6,11 @@ from analysis import (
     DemandStatistics,
     TrendResult,
     OutlierResult,
+    InventoryPlanningResult,
     calculate_demand_statistics,
     calculate_trend,
     detect_outliers,
+    calculate_inventory_planning,
 )
 
 
@@ -242,3 +244,188 @@ def test_outliers_not_deleted():
     assert result.outlier_mask is not None
     assert result.outlier_mask.sum() == 1
     assert original.tolist() == [1.0, 2.0, 3.0, 4.0, 100.0]
+
+
+def test_inventory_planning_known_values():
+    from scipy.stats import norm
+    z = float(norm.ppf(0.95))
+    result = calculate_inventory_planning(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=60.0,
+        lead_time_days=7.0,
+    )
+    assert result.lead_time_demand == pytest.approx(70.0)
+    assert result.lead_time_sd == pytest.approx(3.0 * np.sqrt(7.0))
+    assert result.safety_stock == pytest.approx(z * 3.0 * np.sqrt(7.0))
+    assert result.reorder_point == pytest.approx(70.0 + z * 3.0 * np.sqrt(7.0))
+    assert result.days_remaining == pytest.approx(6.0)
+    assert result.stockout_probability == pytest.approx(1.0 - norm.cdf((60.0 - 70.0) / (3.0 * np.sqrt(7.0))))
+    assert result.reorder_quantity == pytest.approx(max(0.0, 70.0 + z * 3.0 * np.sqrt(7.0) - 60.0))
+    assert result.service_level == pytest.approx(0.95)
+    assert result.z_score == pytest.approx(z)
+    assert result.warnings == []
+
+
+def test_inventory_planning_consistency_at_rop():
+    mean_demand = 10.0
+    std_dev = 3.0
+    lead_time_days = 7.0
+    baseline = calculate_inventory_planning(
+        mean_demand=mean_demand,
+        std_dev=std_dev,
+        current_inventory=60.0,
+        lead_time_days=lead_time_days,
+    )
+    result = calculate_inventory_planning(
+        mean_demand=mean_demand,
+        std_dev=std_dev,
+        current_inventory=baseline.reorder_point,
+        lead_time_days=lead_time_days,
+    )
+    from scipy.stats import norm
+    expected_stockout = 1.0 - norm.cdf(1.6448536269514722)
+    assert result.stockout_probability == pytest.approx(expected_stockout)
+    assert result.stockout_probability == pytest.approx(0.05, abs=1e-3)
+
+
+def test_inventory_planning_zero_mean_demand():
+    result = calculate_inventory_planning(
+        mean_demand=0.0,
+        std_dev=0.0,
+        current_inventory=100.0,
+        lead_time_days=7.0,
+    )
+    assert result.lead_time_demand == pytest.approx(0.0)
+    assert result.days_remaining is None
+    assert result.stockout_probability == pytest.approx(0.0)
+    assert result.reorder_quantity == pytest.approx(0.0)
+    assert any("Zero mean demand" in warning for warning in result.warnings)
+
+
+def test_inventory_planning_zero_std_dev():
+    result = calculate_inventory_planning(
+        mean_demand=10.0,
+        std_dev=0.0,
+        current_inventory=60.0,
+        lead_time_days=7.0,
+    )
+    assert result.lead_time_sd == pytest.approx(0.0)
+    assert result.safety_stock == pytest.approx(0.0)
+    assert result.reorder_point == pytest.approx(70.0)
+    assert result.stockout_probability == pytest.approx(1.0)
+    assert result.reorder_quantity == pytest.approx(10.0)
+    assert any("Zero demand variability" in warning for warning in result.warnings)
+
+
+def test_inventory_planning_zero_std_dev_no_stockout():
+    result = calculate_inventory_planning(
+        mean_demand=10.0,
+        std_dev=0.0,
+        current_inventory=80.0,
+        lead_time_days=7.0,
+    )
+    assert result.stockout_probability == pytest.approx(0.0)
+
+
+def test_inventory_planning_missing_inventory():
+    from scipy.stats import norm
+    z = float(norm.ppf(0.95))
+    result = calculate_inventory_planning(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=None,
+        lead_time_days=7.0,
+    )
+    assert result.lead_time_demand == pytest.approx(70.0)
+    assert result.safety_stock == pytest.approx(z * 3.0 * np.sqrt(7.0))
+    assert result.reorder_point == pytest.approx(70.0 + z * 3.0 * np.sqrt(7.0))
+    assert result.days_remaining is None
+    assert result.stockout_probability is None
+    assert result.reorder_quantity is None
+    assert any("Missing current inventory" in warning for warning in result.warnings)
+
+
+def test_inventory_planning_invalid_lead_time_none():
+    result = calculate_inventory_planning(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=60.0,
+        lead_time_days=None,
+    )
+    assert result.lead_time_demand is None
+    assert result.safety_stock is None
+    assert result.reorder_point is None
+    assert any("Invalid or unavailable lead time" in warning for warning in result.warnings)
+
+
+def test_inventory_planning_invalid_lead_time_zero():
+    result = calculate_inventory_planning(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=60.0,
+        lead_time_days=0.0,
+    )
+    assert result.reorder_point is None
+    assert any("Invalid or unavailable lead time" in warning for warning in result.warnings)
+
+
+def test_inventory_planning_invalid_lead_time_negative():
+    result = calculate_inventory_planning(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=60.0,
+        lead_time_days=-5.0,
+    )
+    assert result.reorder_point is None
+    assert any("Invalid or unavailable lead time" in warning for warning in result.warnings)
+
+
+def test_inventory_planning_configurable_service_level():
+    from scipy.stats import norm
+    z = float(norm.ppf(0.90))
+    result = calculate_inventory_planning(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=60.0,
+        lead_time_days=7.0,
+        service_level=0.90,
+    )
+    assert result.service_level == pytest.approx(0.90)
+    assert result.z_score == pytest.approx(z)
+    assert result.safety_stock == pytest.approx(z * 3.0 * np.sqrt(7.0))
+    assert result.reorder_point == pytest.approx(70.0 + z * 3.0 * np.sqrt(7.0))
+
+
+def test_inventory_planning_reorder_quantity_not_negative():
+    result = calculate_inventory_planning(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=100.0,
+        lead_time_days=7.0,
+    )
+    assert result.reorder_quantity == pytest.approx(0.0)
+    assert result.reorder_quantity >= 0.0
+
+
+def test_inventory_planning_days_remaining():
+    result = calculate_inventory_planning(
+        mean_demand=5.0,
+        std_dev=2.0,
+        current_inventory=20.0,
+        lead_time_days=7.0,
+    )
+    assert result.days_remaining == pytest.approx(4.0)
+
+
+def test_inventory_planning_missing_inventory_nan():
+    result = calculate_inventory_planning(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=np.nan,
+        lead_time_days=7.0,
+    )
+    assert result.days_remaining is None
+    assert result.reorder_quantity is None
+    assert any("Missing current inventory" in warning for warning in result.warnings)
+

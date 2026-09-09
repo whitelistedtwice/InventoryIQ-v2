@@ -190,3 +190,82 @@ def detect_outliers(series: pd.Series) -> OutlierResult:
         method=method,
         warnings=warnings,
     )
+
+
+@dataclass
+class InventoryPlanningResult:
+    lead_time_demand: Optional[float] = None
+    lead_time_sd: Optional[float] = None
+    safety_stock: Optional[float] = None
+    reorder_point: Optional[float] = None
+    days_remaining: Optional[float] = None
+    stockout_probability: Optional[float] = None
+    reorder_quantity: Optional[float] = None
+    service_level: float = 0.95
+    z_score: Optional[float] = None
+    warnings: List[str] = field(default_factory=list)
+
+
+def calculate_inventory_planning(
+    mean_demand: float,
+    std_dev: float,
+    current_inventory: Optional[float],
+    lead_time_days: Optional[float],
+    service_level: float = 0.95,
+) -> InventoryPlanningResult:
+    from scipy.stats import norm
+
+    warnings: List[str] = []
+
+    if lead_time_days is None or np.isnan(lead_time_days) or lead_time_days <= 0:
+        warnings.append("Invalid or unavailable lead time; replenishment calculations unavailable.")
+        return InventoryPlanningResult(service_level=service_level, warnings=warnings)
+
+    z_score = float(norm.ppf(service_level))
+    lead_time_demand = mean_demand * float(lead_time_days)
+    lead_time_sd = std_dev * float(np.sqrt(lead_time_days))
+    safety_stock = z_score * lead_time_sd
+    reorder_point = lead_time_demand + safety_stock
+
+    if current_inventory is None or np.isnan(current_inventory):
+        warnings.append("Missing current inventory; days remaining and reorder quantity unavailable.")
+        return InventoryPlanningResult(
+            lead_time_demand=lead_time_demand,
+            lead_time_sd=lead_time_sd,
+            safety_stock=safety_stock,
+            reorder_point=reorder_point,
+            service_level=service_level,
+            z_score=z_score,
+            warnings=warnings,
+        )
+
+    if mean_demand > 0:
+        days_remaining = current_inventory / mean_demand
+    else:
+        days_remaining = None
+        warnings.append("Zero mean demand; days remaining unavailable.")
+
+    if lead_time_sd == 0:
+        if current_inventory < lead_time_demand:
+            stockout_probability = 1.0
+        else:
+            stockout_probability = 0.0
+        warnings.append("Zero demand variability; deterministic stockout logic used.")
+    else:
+        z_value = (current_inventory - lead_time_demand) / lead_time_sd
+        stockout_probability = float(1.0 - norm.cdf(z_value))
+
+    reorder_quantity = max(0.0, reorder_point - current_inventory)
+
+    return InventoryPlanningResult(
+        lead_time_demand=lead_time_demand,
+        lead_time_sd=lead_time_sd,
+        safety_stock=safety_stock,
+        reorder_point=reorder_point,
+        days_remaining=days_remaining,
+        stockout_probability=stockout_probability,
+        reorder_quantity=reorder_quantity,
+        service_level=service_level,
+        z_score=z_score,
+        warnings=warnings,
+    )
