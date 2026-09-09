@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -14,14 +14,9 @@ from analysis import (
     FinancialMetrics,
     PatternResult,
     ProductRiskResult,
-    ComponentScores,
-    CategoryRiskResult,
-    OverallHealthResult,
     calculate_inventory_planning,
     calculate_financial_and_excess_metrics,
     calculate_product_risk,
-    calculate_category_risk,
-    calculate_overall_health,
 )
 from recommendation import generate_recommendation
 
