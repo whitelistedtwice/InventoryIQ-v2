@@ -11,6 +11,8 @@ from analysis import (
     PatternResult,
     ProductRiskResult,
     ComponentScores,
+    CategoryRiskResult,
+    OverallHealthResult,
     calculate_demand_statistics,
     calculate_trend,
     detect_outliers,
@@ -18,6 +20,8 @@ from analysis import (
     calculate_financial_and_excess_metrics,
     analyze_seasonality,
     calculate_product_risk,
+    calculate_category_risk,
+    calculate_overall_health,
 )
 
 
@@ -1225,4 +1229,385 @@ def test_risk_weights_are_locked_structure():
     assert COMPONENT_WEIGHTS["financial_exposure"] == pytest.approx(0.10)
     assert COMPONENT_WEIGHTS["seasonality"] == pytest.approx(0.10)
     assert abs(sum(COMPONENT_WEIGHTS.values()) - 1.0) < 1e-9
+
+
+def test_category_risk_aggregation():
+    products = [
+        {
+            "category": "Electronics",
+            "risk_score": 80.0,
+            "risk_level": "HIGH",
+            "inventory_value": 1000.0,
+            "capital_tied_up": 1000.0,
+            "shortage_units": 5.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 200.0,
+            "cv": 0.8,
+        },
+        {
+            "category": "Electronics",
+            "risk_score": 60.0,
+            "risk_level": "MEDIUM",
+            "inventory_value": 500.0,
+            "capital_tied_up": 500.0,
+            "shortage_units": 2.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 0.0,
+            "cv": 0.5,
+        },
+        {
+            "category": "Clothing",
+            "risk_score": 20.0,
+            "risk_level": "LOW",
+            "inventory_value": 300.0,
+            "capital_tied_up": 300.0,
+            "shortage_units": 0.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 50.0,
+            "cv": 0.2,
+        },
+    ]
+    results = calculate_category_risk(products, total_inventory_value=1800.0)
+    assert "Electronics" in results
+    assert "Clothing" in results
+
+    electronics = results["Electronics"]
+    assert electronics.product_count == 2
+    assert electronics.high_risk_product_count == 1
+    assert electronics.average_product_risk_score == pytest.approx(70.0)
+    assert electronics.category_inventory_value == pytest.approx(1500.0)
+    assert electronics.category_capital_tied_up == pytest.approx(1500.0)
+    assert electronics.category_stockout_exposure == pytest.approx(70.0)
+    assert electronics.category_excess_inventory_value == pytest.approx(200.0)
+    assert electronics.category_demand_volatility == pytest.approx(0.65)
+
+    clothing = results["Clothing"]
+    assert clothing.product_count == 1
+    assert clothing.high_risk_product_count == 0
+    assert clothing.average_product_risk_score == pytest.approx(20.0)
+    assert clothing.category_inventory_value == pytest.approx(300.0)
+    assert clothing.category_excess_inventory_value == pytest.approx(50.0)
+
+
+def test_category_risk_scoring_known_values():
+    products = [
+        {
+            "category": "A",
+            "risk_score": 50.0,
+            "risk_level": "MEDIUM",
+            "inventory_value": 500.0,
+            "capital_tied_up": 500.0,
+            "shortage_units": 0.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 0.0,
+            "cv": 0.5,
+        },
+        {
+            "category": "A",
+            "risk_score": 70.0,
+            "risk_level": "HIGH",
+            "inventory_value": 500.0,
+            "capital_tied_up": 500.0,
+            "shortage_units": 0.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 0.0,
+            "cv": 0.8,
+        },
+    ]
+    results = calculate_category_risk(products, total_inventory_value=1000.0)
+    category_a = results["A"]
+    assert category_a.average_product_risk_score == pytest.approx(60.0)
+    financial_ratio = 1000.0 / 1000.0
+    financial_score = min(financial_ratio * 100, 100)
+    high_risk_ratio = 1 / 2
+    high_risk_score = min(high_risk_ratio * 200, 100)
+    expected_category_score = 0.70 * 60.0 + 0.15 * financial_score + 0.15 * high_risk_score
+    assert category_a.risk_score == pytest.approx(expected_category_score)
+    assert category_a.risk_level == "HIGH"
+
+
+def test_category_risk_high_risk_product_count():
+    products = [
+        {
+            "category": "A",
+            "risk_score": 80.0,
+            "risk_level": "HIGH",
+            "inventory_value": 100.0,
+            "capital_tied_up": 100.0,
+            "shortage_units": 0.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 0.0,
+            "cv": 0.5,
+        },
+        {
+            "category": "A",
+            "risk_score": 80.0,
+            "risk_level": "HIGH",
+            "inventory_value": 100.0,
+            "capital_tied_up": 100.0,
+            "shortage_units": 0.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 0.0,
+            "cv": 0.5,
+        },
+        {
+            "category": "A",
+            "risk_score": 20.0,
+            "risk_level": "LOW",
+            "inventory_value": 100.0,
+            "capital_tied_up": 100.0,
+            "shortage_units": 0.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 0.0,
+            "cv": 0.2,
+        },
+    ]
+    results = calculate_category_risk(products)
+    assert results["A"].high_risk_product_count == 2
+    assert results["A"].product_count == 3
+
+
+def test_category_risk_stockout_and_excess_exposure():
+    products = [
+        {
+            "category": "A",
+            "risk_score": 50.0,
+            "risk_level": "MEDIUM",
+            "inventory_value": 100.0,
+            "capital_tied_up": 100.0,
+            "shortage_units": 5.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 50.0,
+            "cv": 0.5,
+        },
+        {
+            "category": "A",
+            "risk_score": 50.0,
+            "risk_level": "MEDIUM",
+            "inventory_value": 100.0,
+            "capital_tied_up": 100.0,
+            "shortage_units": 3.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 20.0,
+            "cv": 0.5,
+        },
+    ]
+    results = calculate_category_risk(products)
+    assert results["A"].category_stockout_exposure == pytest.approx(80.0)
+    assert results["A"].category_excess_inventory_value == pytest.approx(70.0)
+
+
+def test_category_risk_different_financial_magnitudes():
+    products = [
+        {
+            "category": "Expensive",
+            "risk_score": 30.0,
+            "risk_level": "LOW",
+            "inventory_value": 10000.0,
+            "capital_tied_up": 10000.0,
+            "shortage_units": 0.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 0.0,
+            "cv": 0.3,
+        },
+        {
+            "category": "Cheap",
+            "risk_score": 30.0,
+            "risk_level": "LOW",
+            "inventory_value": 100.0,
+            "capital_tied_up": 100.0,
+            "shortage_units": 0.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 0.0,
+            "cv": 0.3,
+        },
+    ]
+    results = calculate_category_risk(products, total_inventory_value=10100.0)
+    expensive = results["Expensive"]
+    cheap = results["Cheap"]
+    assert expensive.average_product_risk_score == pytest.approx(30.0)
+    assert cheap.average_product_risk_score == pytest.approx(30.0)
+    assert expensive.category_inventory_value == pytest.approx(10000.0)
+    assert cheap.category_inventory_value == pytest.approx(100.0)
+    assert expensive.risk_score > cheap.risk_score
+
+
+def test_category_missing_insufficient_data():
+    products = [
+        {
+            "category": "A",
+            "risk_score": None,
+            "risk_level": None,
+            "inventory_value": None,
+            "capital_tied_up": None,
+            "shortage_units": None,
+            "selling_price": None,
+            "excess_inventory_value": None,
+            "cv": None,
+        },
+    ]
+    results = calculate_category_risk(products)
+    assert results["A"].risk_score is None
+    assert results["A"].risk_level is None
+    assert any("No valid product risk scores" in warning for warning in results["A"].warnings)
+
+
+def test_overall_health_aggregation():
+    categories = {
+        "Electronics": CategoryRiskResult(
+            category="Electronics",
+            risk_score=70.0,
+            risk_level="HIGH",
+            product_count=5,
+            high_risk_product_count=2,
+            category_stockout_exposure=500.0,
+            category_excess_inventory_value=100.0,
+            category_capital_tied_up=2000.0,
+        ),
+        "Clothing": CategoryRiskResult(
+            category="Clothing",
+            risk_score=30.0,
+            risk_level="LOW",
+            product_count=3,
+            high_risk_product_count=0,
+            category_stockout_exposure=0.0,
+            category_excess_inventory_value=50.0,
+            category_capital_tied_up=500.0,
+        ),
+    }
+    products = [
+        {"risk_level": "HIGH", "revenue_at_risk": 300.0, "profit_at_risk": 100.0},
+        {"risk_level": "HIGH", "revenue_at_risk": 200.0, "profit_at_risk": 50.0},
+        {"risk_level": "MEDIUM", "revenue_at_risk": 0.0, "profit_at_risk": 0.0},
+        {"risk_level": "LOW", "revenue_at_risk": 0.0, "profit_at_risk": 0.0},
+        {"risk_level": "LOW", "revenue_at_risk": 0.0, "profit_at_risk": 0.0},
+        {"risk_level": "LOW", "revenue_at_risk": 0.0, "profit_at_risk": 0.0},
+        {"risk_level": "LOW", "revenue_at_risk": 0.0, "profit_at_risk": 0.0},
+        {"risk_level": "LOW", "revenue_at_risk": 0.0, "profit_at_risk": 0.0},
+    ]
+    result = calculate_overall_health(categories, products)
+    assert result.overall_risk_score == pytest.approx(50.0)
+    assert result.overall_health_status == "ATTENTION"
+    assert result.total_products == 8
+    assert result.products_at_risk == 3
+    assert result.total_categories == 2
+    assert result.high_risk_categories == 1
+    assert result.total_stockout_exposure == pytest.approx(500.0)
+    assert result.total_excess_inventory_value == pytest.approx(150.0)
+    assert result.total_capital_tied_up == pytest.approx(2500.0)
+    assert result.total_revenue_at_risk == pytest.approx(500.0)
+    assert result.total_profit_at_risk == pytest.approx(150.0)
+
+
+def test_overall_health_empty_data():
+    result = calculate_overall_health({}, [])
+    assert result.overall_risk_score is None
+    assert result.overall_health_status is None
+    assert result.total_products == 0
+    assert result.products_at_risk == 0
+    assert any("No category or product data" in warning for warning in result.warnings)
+
+
+def test_overall_health_no_stockout_or_excess():
+    categories = {
+        "A": CategoryRiskResult(
+            category="A",
+            risk_score=30.0,
+            risk_level="LOW",
+            product_count=2,
+            high_risk_product_count=0,
+            category_stockout_exposure=0.0,
+            category_excess_inventory_value=0.0,
+            category_capital_tied_up=100.0,
+        ),
+    }
+    products = [
+        {"risk_level": "LOW", "revenue_at_risk": 0.0, "profit_at_risk": 0.0},
+        {"risk_level": "LOW", "revenue_at_risk": 0.0, "profit_at_risk": 0.0},
+    ]
+    result = calculate_overall_health(categories, products)
+    assert result.overall_risk_score == pytest.approx(30.0)
+    assert result.overall_health_status == "HEALTHY"
+    assert result.total_stockout_exposure is None
+    assert result.total_excess_inventory_value is None
+    assert result.total_capital_tied_up == pytest.approx(100.0)
+
+
+def test_overall_health_all_high_risk():
+    categories = {
+        "A": CategoryRiskResult(
+            category="A",
+            risk_score=85.0,
+            risk_level="HIGH",
+            product_count=3,
+            high_risk_product_count=3,
+            category_stockout_exposure=100.0,
+            category_excess_inventory_value=0.0,
+            category_capital_tied_up=500.0,
+        ),
+    }
+    products = [
+        {"risk_level": "HIGH", "revenue_at_risk": 100.0, "profit_at_risk": 30.0},
+        {"risk_level": "HIGH", "revenue_at_risk": 100.0, "profit_at_risk": 30.0},
+        {"risk_level": "HIGH", "revenue_at_risk": 100.0, "profit_at_risk": 30.0},
+    ]
+    result = calculate_overall_health(categories, products)
+    assert result.overall_risk_score == pytest.approx(85.0)
+    assert result.overall_health_status == "CRITICAL"
+    assert result.products_at_risk == 3
+    assert result.high_risk_categories == 1
+
+
+def test_consistency_product_category_overall():
+    products = [
+        {
+            "category": "A",
+            "risk_score": 80.0,
+            "risk_level": "HIGH",
+            "inventory_value": 1000.0,
+            "capital_tied_up": 1000.0,
+            "shortage_units": 10.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 0.0,
+            "cv": 1.0,
+        },
+        {
+            "category": "A",
+            "risk_score": 60.0,
+            "risk_level": "MEDIUM",
+            "inventory_value": 500.0,
+            "capital_tied_up": 500.0,
+            "shortage_units": 5.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 100.0,
+            "cv": 0.5,
+        },
+        {
+            "category": "B",
+            "risk_score": 20.0,
+            "risk_level": "LOW",
+            "inventory_value": 200.0,
+            "capital_tied_up": 200.0,
+            "shortage_units": 0.0,
+            "selling_price": 10.0,
+            "excess_inventory_value": 0.0,
+            "cv": 0.2,
+        },
+    ]
+    category_results = calculate_category_risk(products, total_inventory_value=1700.0)
+    overall = calculate_overall_health(category_results, products)
+
+    assert overall.total_products == 3
+    assert overall.products_at_risk == 2
+    assert overall.total_categories == 2
+    assert overall.high_risk_categories == 1
+    assert overall.total_stockout_exposure == pytest.approx(150.0)
+    assert overall.total_excess_inventory_value == pytest.approx(100.0)
+    assert overall.total_capital_tied_up == pytest.approx(1700.0)
+
+    category_a = category_results["A"]
+    category_b = category_results["B"]
+    assert category_a.risk_level == "HIGH"
+    assert category_b.risk_level == "LOW"
+    assert overall.overall_health_status == "ATTENTION"
 

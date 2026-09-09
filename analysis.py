@@ -724,3 +724,237 @@ def calculate_product_risk(
         available_weight_sum=available_weight_sum,
         warnings=warnings,
     )
+
+
+@dataclass
+class CategoryRiskResult:
+    category: str = ""
+    risk_score: Optional[float] = None
+    risk_level: Optional[str] = None
+    product_count: int = 0
+    high_risk_product_count: int = 0
+    average_product_risk_score: Optional[float] = None
+    category_inventory_value: Optional[float] = None
+    category_capital_tied_up: Optional[float] = None
+    category_stockout_exposure: Optional[float] = None
+    category_excess_inventory_value: Optional[float] = None
+    category_demand_volatility: Optional[float] = None
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class OverallHealthResult:
+    overall_risk_score: Optional[float] = None
+    overall_health_status: Optional[str] = None
+    total_products: int = 0
+    products_at_risk: int = 0
+    total_categories: int = 0
+    high_risk_categories: int = 0
+    total_stockout_exposure: Optional[float] = None
+    total_excess_inventory_value: Optional[float] = None
+    total_capital_tied_up: Optional[float] = None
+    total_revenue_at_risk: Optional[float] = None
+    total_profit_at_risk: Optional[float] = None
+    warnings: List[str] = field(default_factory=list)
+
+
+def calculate_category_risk(
+    products: List[dict],
+    total_inventory_value: Optional[float] = None,
+) -> dict[str, CategoryRiskResult]:
+    from collections import defaultdict
+
+    warnings: List[str] = []
+    grouped: dict[str, List[dict]] = defaultdict(list)
+    for product in products:
+        category = product.get("category")
+        if category is not None:
+            grouped[category].append(product)
+
+    results: dict[str, CategoryRiskResult] = {}
+
+    for category, category_products in grouped.items():
+        category_warnings: List[str] = []
+        product_count = len(category_products)
+
+        risk_scores: List[float] = []
+        high_risk_count = 0
+        inventory_values: List[float] = []
+        capital_tied_ups: List[float] = []
+        stockout_exposures: List[float] = []
+        excess_values: List[float] = []
+        cvs: List[float] = []
+
+        for product in category_products:
+            risk_score = product.get("risk_score")
+            risk_level = product.get("risk_level")
+            if risk_score is not None:
+                risk_scores.append(float(risk_score))
+            if risk_level == "HIGH":
+                high_risk_count += 1
+
+            inventory_value = product.get("inventory_value")
+            if inventory_value is not None and not np.isnan(inventory_value):
+                inventory_values.append(float(inventory_value))
+
+            capital_tied_up = product.get("capital_tied_up")
+            if capital_tied_up is not None and not np.isnan(capital_tied_up):
+                capital_tied_ups.append(float(capital_tied_up))
+
+            shortage_units = product.get("shortage_units")
+            selling_price = product.get("selling_price")
+            if (
+                shortage_units is not None
+                and not np.isnan(shortage_units)
+                and selling_price is not None
+                and not np.isnan(selling_price)
+            ):
+                stockout_exposures.append(float(shortage_units) * float(selling_price))
+
+            excess_inventory_value = product.get("excess_inventory_value")
+            if excess_inventory_value is not None and not np.isnan(excess_inventory_value):
+                excess_values.append(float(excess_inventory_value))
+
+            cv = product.get("cv")
+            if cv is not None and not np.isnan(cv):
+                cvs.append(float(cv))
+
+        average_risk_score = float(np.mean(risk_scores)) if risk_scores else None
+        category_inventory_value = float(np.sum(inventory_values)) if inventory_values else None
+        category_capital_tied_up = float(np.sum(capital_tied_ups)) if capital_tied_ups else None
+        category_stockout_exposure = float(np.sum(stockout_exposures)) if stockout_exposures else None
+        category_excess_inventory_value = float(np.sum(excess_values)) if excess_values else None
+        category_demand_volatility = float(np.mean(cvs)) if cvs else None
+
+        if not risk_scores:
+            category_warnings.append(
+                f"No valid product risk scores available for category '{category}'."
+            )
+
+        risk_score = None
+        risk_level = None
+
+        if average_risk_score is not None:
+            financial_score = 0.0
+            if (
+                total_inventory_value is not None
+                and not np.isnan(total_inventory_value)
+                and total_inventory_value > 0
+                and category_inventory_value is not None
+            ):
+                financial_ratio = category_inventory_value / total_inventory_value
+                financial_score = min(financial_ratio * 100, 100)
+
+            high_risk_ratio = high_risk_count / product_count if product_count > 0 else 0.0
+            high_risk_score = min(high_risk_ratio * 200, 100)
+
+            risk_score = min(
+                0.70 * average_risk_score + 0.15 * financial_score + 0.15 * high_risk_score,
+                100,
+            )
+            risk_score = max(risk_score, 0)
+
+            if risk_score <= 39:
+                risk_level = "LOW"
+            elif risk_score <= 69:
+                risk_level = "MEDIUM"
+            else:
+                risk_level = "HIGH"
+
+        results[category] = CategoryRiskResult(
+            category=category,
+            risk_score=risk_score,
+            risk_level=risk_level,
+            product_count=product_count,
+            high_risk_product_count=high_risk_count,
+            average_product_risk_score=average_risk_score,
+            category_inventory_value=category_inventory_value,
+            category_capital_tied_up=category_capital_tied_up,
+            category_stockout_exposure=category_stockout_exposure,
+            category_excess_inventory_value=category_excess_inventory_value,
+            category_demand_volatility=category_demand_volatility,
+            warnings=category_warnings,
+        )
+
+    return results
+
+
+def calculate_overall_health(
+    category_results: dict[str, CategoryRiskResult],
+    products: List[dict],
+    total_inventory_value: Optional[float] = None,
+) -> OverallHealthResult:
+    warnings: List[str] = []
+
+    if not category_results and not products:
+        warnings.append("No category or product data available for overall health.")
+        return OverallHealthResult(warnings=warnings)
+
+    category_scores: List[float] = []
+    high_risk_categories = 0
+    total_stockout_exposure = 0.0
+    total_excess_inventory_value = 0.0
+    total_capital_tied_up = 0.0
+    total_revenue_at_risk = 0.0
+    total_profit_at_risk = 0.0
+    products_at_risk = 0
+    stockout_observed = False
+    excess_observed = False
+
+    for category_result in category_results.values():
+        if category_result.risk_score is not None:
+            category_scores.append(category_result.risk_score)
+        if category_result.risk_level == "HIGH":
+            high_risk_categories += 1
+        if category_result.category_stockout_exposure is not None and category_result.category_stockout_exposure > 0:
+            total_stockout_exposure += category_result.category_stockout_exposure
+            stockout_observed = True
+        if category_result.category_excess_inventory_value is not None and category_result.category_excess_inventory_value > 0:
+            total_excess_inventory_value += category_result.category_excess_inventory_value
+            excess_observed = True
+        if category_result.category_capital_tied_up is not None and category_result.category_capital_tied_up > 0:
+            total_capital_tied_up += category_result.category_capital_tied_up
+
+    for product in products:
+        risk_level = product.get("risk_level")
+        if risk_level in ("MEDIUM", "HIGH"):
+            products_at_risk += 1
+
+        revenue_at_risk = product.get("revenue_at_risk")
+        if revenue_at_risk is not None and not np.isnan(revenue_at_risk):
+            total_revenue_at_risk += float(revenue_at_risk)
+
+        profit_at_risk = product.get("profit_at_risk")
+        if profit_at_risk is not None and not np.isnan(profit_at_risk):
+            total_profit_at_risk += float(profit_at_risk)
+
+    overall_risk_score = float(np.mean(category_scores)) if category_scores else None
+    overall_health_status = None
+
+    if overall_risk_score is not None:
+        if overall_risk_score <= 39:
+            overall_health_status = "HEALTHY"
+        elif overall_risk_score <= 69:
+            overall_health_status = "ATTENTION"
+        else:
+            overall_health_status = "CRITICAL"
+
+    if total_stockout_exposure == 0 and stockout_observed is False:
+        total_stockout_exposure = None
+    if total_excess_inventory_value == 0 and excess_observed is False:
+        total_excess_inventory_value = None
+
+    return OverallHealthResult(
+        overall_risk_score=overall_risk_score,
+        overall_health_status=overall_health_status,
+        total_products=len(products),
+        products_at_risk=products_at_risk,
+        total_categories=len(category_results),
+        high_risk_categories=high_risk_categories,
+        total_stockout_exposure=total_stockout_exposure if stockout_observed else None,
+        total_excess_inventory_value=total_excess_inventory_value if excess_observed else None,
+        total_capital_tied_up=total_capital_tied_up if total_capital_tied_up > 0 else None,
+        total_revenue_at_risk=total_revenue_at_risk if total_revenue_at_risk > 0 else None,
+        total_profit_at_risk=total_profit_at_risk if total_profit_at_risk > 0 else None,
+        warnings=warnings,
+    )
