@@ -81,3 +81,112 @@ def calculate_demand_statistics(series: pd.Series) -> DemandStatistics:
         observation_count=observation_count,
         warnings=warnings,
     )
+
+
+@dataclass
+class TrendResult:
+    slope: Optional[float] = None
+    intercept: Optional[float] = None
+    trend_strength: Optional[float] = None
+    trend: Optional[str] = None
+    warnings: List[str] = field(default_factory=list)
+
+
+def calculate_trend(series: pd.Series) -> TrendResult:
+    clean = series.dropna()
+    n = int(clean.count())
+    warnings: List[str] = []
+
+    if n < 2:
+        warnings.append("Insufficient observations for trend analysis.")
+        return TrendResult(warnings=warnings)
+
+    values = clean.to_numpy(dtype=float)
+    t = np.arange(n, dtype=float)
+
+    slope, intercept = np.polyfit(t, values, 1)
+
+    mean = float(np.mean(values))
+    if mean == 0:
+        warnings.append("Mean demand is zero; trend strength is unavailable.")
+        return TrendResult(
+            slope=float(slope),
+            intercept=float(intercept),
+            warnings=warnings,
+        )
+
+    trend_strength = float(slope * (n - 1) / mean)
+
+    if trend_strength > 0.10:
+        trend = "INCREASING"
+    elif trend_strength < -0.10:
+        trend = "DECREASING"
+    else:
+        trend = "STABLE"
+
+    return TrendResult(
+        slope=float(slope),
+        intercept=float(intercept),
+        trend_strength=trend_strength,
+        trend=trend,
+        warnings=warnings,
+    )
+
+
+@dataclass
+class OutlierResult:
+    outlier_mask: Optional[pd.Series] = None
+    lower_fence: Optional[float] = None
+    upper_fence: Optional[float] = None
+    method: Optional[str] = None
+    warnings: List[str] = field(default_factory=list)
+
+
+def detect_outliers(series: pd.Series) -> OutlierResult:
+    clean = series.dropna()
+    n = int(clean.count())
+    warnings: List[str] = []
+
+    if n < 2:
+        warnings.append("No valid observations for outlier detection.")
+        return OutlierResult(warnings=warnings)
+
+    values = clean.to_numpy(dtype=float)
+    q1 = float(np.percentile(values, 25))
+    q3 = float(np.percentile(values, 75))
+    iqr = q3 - q1
+
+    lower_fence: Optional[float] = None
+    upper_fence: Optional[float] = None
+    use_mad = iqr == 0 or n < 5
+
+    if use_mad:
+        median = float(np.median(values))
+        mad = float(np.median(np.abs(values - median)))
+        if mad == 0:
+            warnings.append(
+                "Zero median absolute deviation; outlier detection unavailable."
+            )
+            return OutlierResult(warnings=warnings)
+
+        robust_z = 0.6745 * (values - median) / mad
+        outlier_flags = np.abs(robust_z) > 3.5
+        method = "MAD"
+    else:
+        lower_fence = q1 - 1.5 * iqr
+        upper_fence = q3 + 1.5 * iqr
+        outlier_flags = (values < lower_fence) | (values > upper_fence)
+        method = "IQR"
+
+    full_mask = pd.Series(False, index=series.index)
+    clean_indices = series.dropna().index
+    for i, idx in enumerate(clean_indices):
+        full_mask[idx] = bool(outlier_flags[i])
+
+    return OutlierResult(
+        outlier_mask=full_mask,
+        lower_fence=float(lower_fence) if lower_fence is not None else None,
+        upper_fence=float(upper_fence) if upper_fence is not None else None,
+        method=method,
+        warnings=warnings,
+    )
