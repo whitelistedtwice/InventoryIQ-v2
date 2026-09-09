@@ -379,3 +379,109 @@ def calculate_financial_and_excess_metrics(
         planning_horizon=planning_horizon,
         warnings=warnings,
     )
+
+
+@dataclass
+class PatternResult:
+    overall_mean_demand: Optional[float] = None
+    weekday_factors: Optional[dict] = None
+    monthly_factors: Optional[dict] = None
+    weekday_pattern_available: bool = False
+    monthly_pattern_label: Optional[str] = None
+    peak_weekday: Optional[str] = None
+    drop_weekday: Optional[str] = None
+    peak_month: Optional[str] = None
+    drop_month: Optional[str] = None
+    warnings: List[str] = field(default_factory=list)
+
+
+def analyze_seasonality(series: pd.Series) -> PatternResult:
+    clean = series.dropna()
+    observation_count = int(clean.count())
+    warnings: List[str] = []
+
+    if observation_count == 0:
+        warnings.append("No valid demand observations for seasonality analysis.")
+        return PatternResult(warnings=warnings)
+
+    if not isinstance(series.index, pd.DatetimeIndex):
+        warnings.append("Series index must be DatetimeIndex for seasonality analysis.")
+        return PatternResult(
+            overall_mean_demand=float(np.mean(clean.to_numpy(dtype=float))),
+            warnings=warnings,
+        )
+
+    values = clean.to_numpy(dtype=float)
+    overall_mean = float(np.mean(values))
+
+    if overall_mean == 0:
+        warnings.append("Overall mean demand is zero; seasonality factors unavailable.")
+        return PatternResult(overall_mean_demand=0.0, warnings=warnings)
+
+    dates = clean.index
+    weekdays = dates.weekday
+    months = dates.month
+
+    weekday_means = clean.groupby(pd.Series(weekdays, index=clean.index)).mean()
+    monthly_means = clean.groupby(pd.Series(months, index=clean.index)).mean()
+
+    weekday_factors = {}
+    for day_num, mean_val in weekday_means.items():
+        weekday_factors[day_num] = float(mean_val / overall_mean)
+
+    monthly_factors = {}
+    for month_num, mean_val in monthly_means.items():
+        monthly_factors[month_num] = float(mean_val / overall_mean)
+
+    unique_days = clean.nunique()
+    date_range_days = (dates.max() - dates.min()).days + 1
+    unique_weeks = len(clean.groupby(clean.index.isocalendar().week))
+
+    if unique_weeks >= 4 and len(weekday_factors) >= 2:
+        weekday_pattern_available = True
+    else:
+        weekday_pattern_available = False
+        warnings.append(
+            f"Insufficient history for reliable weekday pattern ({unique_weeks} weeks observed)."
+        )
+
+    unique_months = len(monthly_factors)
+    if unique_months >= 12:
+        monthly_pattern_label = "Annual monthly seasonality"
+    elif unique_months >= 2:
+        monthly_pattern_label = "Observed monthly pattern"
+        warnings.append(
+            f"Short history ({unique_months} months); treating as observed monthly pattern, not annual seasonality."
+        )
+    else:
+        monthly_pattern_label = None
+        warnings.append("Insufficient months for monthly pattern analysis.")
+
+    peak_weekday = None
+    drop_weekday = None
+    if weekday_factors:
+        peak_day_num = max(weekday_factors, key=weekday_factors.get)
+        drop_day_num = min(weekday_factors, key=weekday_factors.get)
+        peak_weekday = pd.Timestamp("2024-01-0" + str(peak_day_num + 1)).day_name() if peak_day_num < 6 else "Sunday"
+        drop_weekday = pd.Timestamp("2024-01-0" + str(drop_day_num + 1)).day_name() if drop_day_num < 6 else "Sunday"
+
+    peak_month = None
+    drop_month = None
+    if monthly_factors:
+        peak_month_num = max(monthly_factors, key=monthly_factors.get)
+        drop_month_num = min(monthly_factors, key=monthly_factors.get)
+        peak_month = pd.Timestamp("2024-" + str(peak_month_num).zfill(2) + "-01").month_name()
+        drop_month = pd.Timestamp("2024-" + str(drop_month_num).zfill(2) + "-01").month_name()
+
+    return PatternResult(
+        overall_mean_demand=overall_mean,
+        weekday_factors=weekday_factors if weekday_factors else None,
+        monthly_factors=monthly_factors if monthly_factors else None,
+        weekday_pattern_available=weekday_pattern_available,
+        monthly_pattern_label=monthly_pattern_label,
+        peak_weekday=peak_weekday,
+        drop_weekday=drop_weekday,
+        peak_month=peak_month,
+        drop_month=drop_month,
+        warnings=warnings,
+    )

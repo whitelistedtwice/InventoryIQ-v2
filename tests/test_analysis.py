@@ -8,11 +8,13 @@ from analysis import (
     OutlierResult,
     InventoryPlanningResult,
     FinancialMetrics,
+    PatternResult,
     calculate_demand_statistics,
     calculate_trend,
     detect_outliers,
     calculate_inventory_planning,
     calculate_financial_and_excess_metrics,
+    analyze_seasonality,
 )
 
 
@@ -622,4 +624,107 @@ def test_financial_invalid_lead_time():
     assert result.target_stock is None
     assert result.excess_units is None
     assert any("Invalid or unavailable lead time" in warning for warning in result.warnings)
+
+
+def _seasonality_series(dates, values):
+    return pd.Series(values, index=pd.DatetimeIndex(dates), name="demand")
+
+
+def test_seasonality_known_weekday_factors():
+    dates = pd.date_range("2024-01-01", periods=28, freq="D")
+    values = [5.0, 10.0, 15.0, 20.0, 5.0, 10.0, 15.0] * 4
+    series = _seasonality_series(dates, values)
+    result = analyze_seasonality(series)
+    assert result.weekday_pattern_available is True
+    assert result.weekday_factors is not None
+    assert result.weekday_factors[0] == pytest.approx(5.0 / 11.428571428571429)
+    assert result.weekday_factors[1] == pytest.approx(10.0 / 11.428571428571429)
+    assert result.weekday_factors[2] == pytest.approx(15.0 / 11.428571428571429)
+    assert result.weekday_factors[3] == pytest.approx(20.0 / 11.428571428571429)
+    assert result.weekday_factors[4] == pytest.approx(5.0 / 11.428571428571429)
+    assert result.weekday_factors[5] == pytest.approx(10.0 / 11.428571428571429)
+    assert result.weekday_factors[6] == pytest.approx(15.0 / 11.428571428571429)
+
+
+def test_seasonality_known_monthly_factors():
+    dates = pd.date_range("2024-01-01", periods=365, freq="D")
+    values = [10.0 if d.month == 1 else 5.0 for d in dates]
+    series = _seasonality_series(dates, values)
+    result = analyze_seasonality(series)
+    assert result.monthly_factors is not None
+    jan_factor = 10.0 / ((31 * 10.0 + 334 * 5.0) / 365)
+    assert result.monthly_factors[1] == pytest.approx(jan_factor)
+    assert result.monthly_factors[2] == pytest.approx(5.0 / ((31 * 10.0 + 334 * 5.0) / 365))
+    assert result.monthly_pattern_label == "Annual monthly seasonality"
+    assert result.peak_month == "January"
+    assert result.drop_month in ["February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+
+
+def test_seasonality_peak_drop_identification():
+    dates = pd.date_range("2024-01-01", periods=28, freq="D")
+    values = [5.0, 10.0, 15.0, 20.0, 5.0, 10.0, 15.0] * 4
+    series = _seasonality_series(dates, values)
+    result = analyze_seasonality(series)
+    assert result.peak_weekday == "Thursday"
+    assert result.drop_weekday == "Monday"
+
+
+def test_seasonality_insufficient_weekday_history():
+    dates = pd.date_range("2024-01-01", periods=14, freq="D")
+    values = [10.0] * 14
+    series = _seasonality_series(dates, values)
+    result = analyze_seasonality(series)
+    assert result.weekday_pattern_available is False
+    assert any("Insufficient history for reliable weekday pattern" in warning for warning in result.warnings)
+
+
+def test_seasonality_insufficient_monthly_history():
+    dates = pd.date_range("2024-01-01", periods=60, freq="D")
+    values = [10.0] * 60
+    series = _seasonality_series(dates, values)
+    result = analyze_seasonality(series)
+    assert result.monthly_pattern_label == "Observed monthly pattern"
+    assert any("Short history" in warning for warning in result.warnings)
+
+
+def test_seasonality_zero_demand():
+    dates = pd.date_range("2024-01-01", periods=28, freq="D")
+    values = [0.0] * 28
+    series = _seasonality_series(dates, values)
+    result = analyze_seasonality(series)
+    assert result.overall_mean_demand == pytest.approx(0.0)
+    assert result.weekday_factors is None
+    assert result.monthly_factors is None
+    assert any("Overall mean demand is zero" in warning for warning in result.warnings)
+
+
+def test_seasonality_distinction_observed_vs_annual():
+    dates_short = pd.date_range("2024-01-01", periods=180, freq="D")
+    values_short = [10.0] * 180
+    series_short = _seasonality_series(dates_short, values_short)
+    result_short = analyze_seasonality(series_short)
+    assert result_short.monthly_pattern_label == "Observed monthly pattern"
+
+    dates_long = pd.date_range("2024-01-01", periods=365, freq="D")
+    values_long = [10.0] * 365
+    series_long = _seasonality_series(dates_long, values_long)
+    result_long = analyze_seasonality(series_long)
+    assert result_long.monthly_pattern_label == "Annual monthly seasonality"
+
+
+def test_seasonality_missing_datetime_index():
+    series = pd.Series([10.0, 20.0, 30.0])
+    result = analyze_seasonality(series)
+    assert result.weekday_factors is None
+    assert result.monthly_factors is None
+    assert any("DatetimeIndex" in warning for warning in result.warnings)
+
+
+def test_seasonality_empty_series():
+    series = pd.Series([], dtype=float)
+    result = analyze_seasonality(series)
+    assert result.overall_mean_demand is None
+    assert result.weekday_factors is None
+    assert result.monthly_factors is None
+    assert any("No valid demand observations" in warning for warning in result.warnings)
 
