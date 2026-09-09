@@ -340,7 +340,13 @@ def calculate_financial_and_excess_metrics(
     )
     warnings.extend(planning.warnings)
 
-    shortage_units = max(0.0, planning.lead_time_demand - (current_inventory or 0.0)) if planning.lead_time_demand is not None else None
+    if planning.lead_time_demand is not None:
+        if current_inventory is None or np.isnan(current_inventory):
+            shortage_units = None
+        else:
+            shortage_units = max(0.0, planning.lead_time_demand - current_inventory)
+    else:
+        shortage_units = None
 
     if shortage_units is not None:
         revenue_at_risk = shortage_units * selling_price
@@ -483,5 +489,238 @@ def analyze_seasonality(series: pd.Series) -> PatternResult:
         drop_weekday=drop_weekday,
         peak_month=peak_month,
         drop_month=drop_month,
+        warnings=warnings,
+    )
+
+
+@dataclass
+class ComponentScores:
+    stockout_exposure: Optional[float] = None
+    demand_volatility: Optional[float] = None
+    demand_trend: Optional[float] = None
+    excess_inventory: Optional[float] = None
+    financial_exposure: Optional[float] = None
+    seasonality: Optional[float] = None
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ProductRiskResult:
+    risk_score: Optional[float] = None
+    risk_level: Optional[str] = None
+    component_scores: ComponentScores = field(default_factory=ComponentScores)
+    weights_used: dict = field(default_factory=dict)
+    available_weight_sum: float = 0.0
+    warnings: List[str] = field(default_factory=list)
+
+
+def _normalize_stockout(stockout_probability: Optional[float]) -> tuple[Optional[float], List[str]]:
+    warnings: List[str] = []
+    if stockout_probability is None:
+        warnings.append("Stockout probability unavailable; stockout component excluded.")
+        return None, warnings
+    return min(stockout_probability * 100, 100), warnings
+
+
+def _normalize_volatility(cv: Optional[float]) -> tuple[Optional[float], List[str]]:
+    warnings: List[str] = []
+    if cv is None:
+        warnings.append("Coefficient of variation unavailable; volatility component excluded.")
+        return None, warnings
+    return min(cv * 50, 100), warnings
+
+
+def _normalize_trend(
+    trend_result: TrendResult,
+    current_inventory: Optional[float],
+    reorder_point: Optional[float],
+    target_stock: Optional[float],
+) -> tuple[Optional[float], List[str]]:
+    warnings: List[str] = []
+    if trend_result.trend is None or trend_result.trend_strength is None:
+        warnings.append("Trend unavailable; trend component excluded.")
+        return None, warnings
+
+    base_score = min(abs(trend_result.trend_strength) * 100, 100)
+
+    if trend_result.trend == "STABLE":
+        return 20.0, warnings
+
+    if current_inventory is None:
+        warnings.append("Current inventory unavailable; trend context unknown; trend component excluded.")
+        return None, warnings
+
+    if reorder_point is None or target_stock is None:
+        warnings.append("Inventory thresholds unavailable; trend component excluded.")
+        return None, warnings
+
+    if trend_result.trend == "INCREASING":
+        if current_inventory < reorder_point:
+            multiplier = 1.0
+        elif current_inventory > target_stock:
+            multiplier = 0.5
+        else:
+            multiplier = 0.7
+    elif trend_result.trend == "DECREASING":
+        if current_inventory > target_stock:
+            multiplier = 1.0
+        elif current_inventory < reorder_point:
+            multiplier = 0.5
+        else:
+            multiplier = 0.7
+    else:
+        multiplier = 0.3
+
+    return min(base_score * multiplier, 100), warnings
+
+
+def _normalize_excess(
+    current_inventory: Optional[float],
+    target_stock: Optional[float],
+    excess_units: Optional[float],
+) -> tuple[Optional[float], List[str]]:
+    warnings: List[str] = []
+    if current_inventory is None or target_stock is None or excess_units is None:
+        warnings.append("Excess inventory data unavailable; excess component excluded.")
+        return None, warnings
+    if excess_units <= 0:
+        return 0.0, warnings
+    ratio = excess_units / target_stock
+    return min(ratio * 100, 100), warnings
+
+
+def _normalize_financial(
+    revenue_at_risk: Optional[float],
+    financial_reference: Optional[float],
+) -> tuple[Optional[float], List[str]]:
+    warnings: List[str] = []
+    if revenue_at_risk is None:
+        warnings.append("Revenue at risk unavailable; financial component excluded.")
+        return None, warnings
+    if financial_reference is None or np.isnan(financial_reference) or financial_reference <= 0:
+        warnings.append("Product-set financial reference unavailable; financial component excluded.")
+        return None, warnings
+    return min(revenue_at_risk / financial_reference * 100, 100), warnings
+
+
+def _normalize_seasonality(pattern_result: PatternResult) -> tuple[Optional[float], List[str]]:
+    warnings: List[str] = []
+    weekday_factors = pattern_result.weekday_factors
+    monthly_factors = pattern_result.monthly_factors
+
+    if not weekday_factors and not monthly_factors:
+        warnings.append("Seasonality patterns unavailable; seasonality component excluded.")
+        return None, warnings
+
+    deviations: List[float] = []
+    if weekday_factors:
+        deviations.extend(abs(f - 1.0) for f in weekday_factors.values())
+    if monthly_factors:
+        deviations.extend(abs(f - 1.0) for f in monthly_factors.values())
+
+    max_deviation = max(deviations) if deviations else 0.0
+    return min(max_deviation * 100, 100), warnings
+
+
+COMPONENT_WEIGHTS = {
+    "stockout_exposure": 0.30,
+    "demand_volatility": 0.20,
+    "demand_trend": 0.15,
+    "excess_inventory": 0.15,
+    "financial_exposure": 0.10,
+    "seasonality": 0.10,
+}
+
+
+def calculate_product_risk(
+    demand_stats: DemandStatistics,
+    trend_result: TrendResult,
+    planning_result: InventoryPlanningResult,
+    financial_result: FinancialMetrics,
+    pattern_result: PatternResult,
+    current_inventory: Optional[float],
+    unit_cost: float,
+    selling_price: float,
+    financial_reference: Optional[float] = None,
+) -> ProductRiskResult:
+    warnings: List[str] = []
+    component_scores = ComponentScores()
+
+    stockout_score, stockout_warnings = _normalize_stockout(planning_result.stockout_probability)
+    component_scores.stockout_exposure = stockout_score
+    warnings.extend(stockout_warnings)
+
+    volatility_score, volatility_warnings = _normalize_volatility(demand_stats.cv)
+    component_scores.demand_volatility = volatility_score
+    warnings.extend(volatility_warnings)
+
+    trend_score, trend_warnings = _normalize_trend(
+        trend_result=trend_result,
+        current_inventory=current_inventory,
+        reorder_point=planning_result.reorder_point,
+        target_stock=financial_result.target_stock,
+    )
+    component_scores.demand_trend = trend_score
+    warnings.extend(trend_warnings)
+
+    excess_score, excess_warnings = _normalize_excess(
+        current_inventory=current_inventory,
+        target_stock=financial_result.target_stock,
+        excess_units=financial_result.excess_units,
+    )
+    component_scores.excess_inventory = excess_score
+    warnings.extend(excess_warnings)
+
+    financial_score, financial_warnings = _normalize_financial(
+        revenue_at_risk=financial_result.revenue_at_risk,
+        financial_reference=financial_reference,
+    )
+    component_scores.financial_exposure = financial_score
+    warnings.extend(financial_warnings)
+
+    seasonality_score, seasonality_warnings = _normalize_seasonality(pattern_result)
+    component_scores.seasonality = seasonality_score
+    warnings.extend(seasonality_warnings)
+
+    scores = {
+        "stockout_exposure": stockout_score,
+        "demand_volatility": volatility_score,
+        "demand_trend": trend_score,
+        "excess_inventory": excess_score,
+        "financial_exposure": financial_score,
+        "seasonality": seasonality_score,
+    }
+
+    available_components = {k: v for k, v in scores.items() if v is not None}
+    available_weight_sum = sum(COMPONENT_WEIGHTS[k] for k in available_components)
+    weights_used = {k: COMPONENT_WEIGHTS[k] for k in available_components}
+
+    if available_weight_sum == 0:
+        warnings.append("No risk components available; risk score unavailable.")
+        return ProductRiskResult(
+            component_scores=component_scores,
+            weights_used=weights_used,
+            available_weight_sum=0.0,
+            warnings=warnings,
+        )
+
+    renormalized_score = sum(
+        available_components[k] * (COMPONENT_WEIGHTS[k] / available_weight_sum) for k in available_components
+    )
+    risk_score = min(max(renormalized_score, 0), 100)
+
+    if risk_score <= 39:
+        risk_level = "LOW"
+    elif risk_score <= 69:
+        risk_level = "MEDIUM"
+    else:
+        risk_level = "HIGH"
+
+    return ProductRiskResult(
+        risk_score=risk_score,
+        risk_level=risk_level,
+        component_scores=component_scores,
+        weights_used=weights_used,
+        available_weight_sum=available_weight_sum,
         warnings=warnings,
     )

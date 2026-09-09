@@ -9,12 +9,15 @@ from analysis import (
     InventoryPlanningResult,
     FinancialMetrics,
     PatternResult,
+    ProductRiskResult,
+    ComponentScores,
     calculate_demand_statistics,
     calculate_trend,
     detect_outliers,
     calculate_inventory_planning,
     calculate_financial_and_excess_metrics,
     analyze_seasonality,
+    calculate_product_risk,
 )
 
 
@@ -727,4 +730,499 @@ def test_seasonality_empty_series():
     assert result.weekday_factors is None
     assert result.monthly_factors is None
     assert any("No valid demand observations" in warning for warning in result.warnings)
+
+
+def _risk_components(
+    mean_demand=10.0,
+    std_dev=3.0,
+    current_inventory=60.0,
+    unit_cost=5.0,
+    selling_price=10.0,
+    lead_time_days=7.0,
+    planning_horizon=30.0,
+    service_level=0.95,
+    financial_reference=None,
+    trend_strength=None,
+    trend=None,
+    cv=None,
+    stockout_prob=None,
+    excess_units=None,
+    target_stock=None,
+    reorder_point=None,
+    revenue_at_risk=None,
+    weekday_factors=None,
+    monthly_factors=None,
+    monthly_pattern_label=None,
+):
+    demand_stats = DemandStatistics(mean=mean_demand, std_dev=std_dev, cv=cv)
+    trend_result = TrendResult(trend_strength=trend_strength, trend=trend)
+    planning_result = InventoryPlanningResult(
+        stockout_probability=stockout_prob,
+        reorder_point=reorder_point,
+    )
+    financial_res = FinancialMetrics(
+        excess_units=excess_units,
+        target_stock=target_stock,
+        revenue_at_risk=revenue_at_risk,
+        planning_horizon=planning_horizon,
+    )
+    pattern_result = PatternResult(
+        weekday_factors=weekday_factors,
+        monthly_factors=monthly_factors,
+        monthly_pattern_label=monthly_pattern_label,
+    )
+    return calculate_product_risk(
+        demand_stats=demand_stats,
+        trend_result=trend_result,
+        planning_result=planning_result,
+        financial_result=financial_res,
+        pattern_result=pattern_result,
+        current_inventory=current_inventory,
+        unit_cost=unit_cost,
+        selling_price=selling_price,
+        financial_reference=financial_reference,
+    )
+
+
+def test_risk_score_known_values():
+    result = _risk_components(
+        cv=0.8,
+        trend_strength=0.3,
+        trend="INCREASING",
+        stockout_prob=0.8,
+        excess_units=20.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=200.0,
+        financial_reference=1000.0,
+        monthly_pattern_label="Observed monthly pattern",
+        monthly_factors={1: 1.5},
+    )
+    stockout_contrib = 0.30 * 80
+    volatility_contrib = 0.20 * min(0.8 * 50, 100)
+    trend_contrib = 0.15 * min(0.3 * 100, 100) * 1.0
+    excess_contrib = 0.15 * min(20.0 / 100.0 * 100, 100)
+    financial_contrib = 0.10 * min(200.0 / 1000.0 * 100, 100)
+    seasonality_contrib = 0.10 * min(abs(1.5 - 1.0) * 100, 100)
+    expected_score = stockout_contrib + volatility_contrib + trend_contrib + excess_contrib + financial_contrib + seasonality_contrib
+    assert result.risk_score == pytest.approx(expected_score)
+    assert result.risk_level == "MEDIUM"
+
+
+def test_risk_level_low():
+    result = _risk_components(
+        cv=0.1,
+        trend_strength=0.05,
+        trend="STABLE",
+        stockout_prob=0.05,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=0.0,
+        financial_reference=1000.0,
+    )
+    assert result.risk_score <= 39
+    assert result.risk_level == "LOW"
+
+
+def test_risk_level_medium():
+    result = _risk_components(
+        cv=0.8,
+        trend_strength=0.4,
+        trend="INCREASING",
+        stockout_prob=0.6,
+        excess_units=20.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=200.0,
+        financial_reference=1000.0,
+        monthly_factors={1: 1.5},
+    )
+    assert 40 <= result.risk_score <= 69
+    assert result.risk_level == "MEDIUM"
+
+
+def test_risk_level_high():
+    result = _risk_components(
+        cv=1.5,
+        trend_strength=0.5,
+        trend="INCREASING",
+        stockout_prob=0.9,
+        excess_units=50.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=500.0,
+        financial_reference=500.0,
+        monthly_factors={1: 2.0},
+    )
+    assert result.risk_score >= 70
+    assert result.risk_level == "HIGH"
+
+
+def test_risk_financial_normalization_relative():
+    result_expensive = _risk_components(
+        cv=0.3,
+        trend_strength=0.1,
+        trend="STABLE",
+        stockout_prob=0.1,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=5000.0,
+        financial_reference=10000.0,
+    )
+    result_cheap = _risk_components(
+        cv=0.3,
+        trend_strength=0.1,
+        trend="STABLE",
+        stockout_prob=0.1,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=50.0,
+        financial_reference=100.0,
+    )
+    assert result_expensive.component_scores.financial_exposure == pytest.approx(50.0)
+    assert result_cheap.component_scores.financial_exposure == pytest.approx(50.0)
+    assert result_expensive.component_scores.financial_exposure == pytest.approx(result_cheap.component_scores.financial_exposure)
+
+
+def test_risk_financial_missing_reference_is_unavailable():
+    result = _risk_components(
+        cv=0.3,
+        trend_strength=0.1,
+        trend="STABLE",
+        stockout_prob=0.1,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=200.0,
+        financial_reference=None,
+    )
+    assert result.component_scores.financial_exposure is None
+    assert any("Product-set financial reference unavailable" in warning for warning in result.warnings)
+    assert result.available_weight_sum == pytest.approx(0.80)
+    assert result.risk_score < 100
+
+
+def test_risk_financial_zero_reference_is_unavailable():
+    result = _risk_components(
+        cv=0.3,
+        trend_strength=0.1,
+        trend="STABLE",
+        stockout_prob=0.1,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=200.0,
+        financial_reference=0.0,
+    )
+    assert result.component_scores.financial_exposure is None
+    assert any("Product-set financial reference unavailable" in warning for warning in result.warnings)
+
+
+def test_risk_high_stockout_scenario():
+    result = _risk_components(
+        cv=2.0,
+        trend_strength=0.8,
+        trend="INCREASING",
+        stockout_prob=0.95,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=500.0,
+        financial_reference=500.0,
+        monthly_factors={1: 2.0},
+    )
+    assert result.component_scores.stockout_exposure == pytest.approx(95.0)
+    assert result.risk_score >= 70
+    assert result.risk_level == "HIGH"
+
+
+def test_risk_high_volatility_scenario():
+    result = _risk_components(
+        cv=2.0,
+        trend_strength=0.8,
+        trend="INCREASING",
+        stockout_prob=0.6,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=500.0,
+        financial_reference=500.0,
+        monthly_factors={1: 2.0},
+    )
+    assert result.component_scores.demand_volatility == pytest.approx(100.0)
+    assert result.risk_score >= 70
+    assert result.risk_level == "HIGH"
+
+
+def test_risk_increasing_trend_low_inventory():
+    result = _risk_components(
+        cv=0.3,
+        trend_strength=0.4,
+        trend="INCREASING",
+        stockout_prob=0.6,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=0.0,
+        financial_reference=1000.0,
+        current_inventory=50.0,
+    )
+    assert result.component_scores.demand_trend == pytest.approx(40.0)
+
+
+def test_risk_decreasing_trend_high_inventory():
+    result = _risk_components(
+        cv=0.3,
+        trend_strength=-0.4,
+        trend="DECREASING",
+        stockout_prob=0.1,
+        excess_units=30.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=0.0,
+        financial_reference=1000.0,
+        current_inventory=150.0,
+    )
+    assert result.component_scores.demand_trend == pytest.approx(40.0)
+
+
+def test_risk_excess_inventory_scenario():
+    result = _risk_components(
+        cv=0.2,
+        trend_strength=-0.1,
+        trend="DECREASING",
+        stockout_prob=0.05,
+        excess_units=50.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=0.0,
+        financial_reference=1000.0,
+        current_inventory=150.0,
+    )
+    assert result.component_scores.excess_inventory == pytest.approx(50.0)
+
+
+def test_risk_seasonality_contribution():
+    result = _risk_components(
+        cv=0.2,
+        trend_strength=0.0,
+        trend="STABLE",
+        stockout_prob=0.1,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=0.0,
+        financial_reference=1000.0,
+        weekday_factors={0: 1.5, 1: 0.8},
+        monthly_factors={1: 2.0},
+    )
+    assert result.component_scores.seasonality == pytest.approx(100.0)
+
+
+def test_risk_missing_stockout_data():
+    result = _risk_components(
+        cv=0.3,
+        trend_strength=0.1,
+        trend="STABLE",
+        stockout_prob=None,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=0.0,
+        financial_reference=1000.0,
+    )
+    assert result.component_scores.stockout_exposure is None
+    assert result.available_weight_sum == pytest.approx(0.60)
+    assert any("Stockout probability unavailable" in warning for warning in result.warnings)
+
+
+def test_risk_missing_trend_data():
+    result = _risk_components(
+        cv=0.3,
+        trend_strength=None,
+        trend=None,
+        stockout_prob=0.1,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=0.0,
+        financial_reference=1000.0,
+    )
+    assert result.component_scores.demand_trend is None
+    assert any("Trend unavailable" in warning for warning in result.warnings)
+
+
+def test_risk_all_components_missing():
+    result = _risk_components(
+        cv=None,
+        trend_strength=None,
+        trend=None,
+        stockout_prob=None,
+        excess_units=None,
+        target_stock=None,
+        reorder_point=None,
+        revenue_at_risk=None,
+        financial_reference=1000.0,
+    )
+    assert result.risk_score is None
+    assert result.risk_level is None
+    assert any("No risk components available" in warning for warning in result.warnings)
+
+
+def test_risk_score_clamping():
+    result = _risk_components(
+        cv=3.0,
+        trend_strength=1.0,
+        trend="INCREASING",
+        stockout_prob=1.0,
+        excess_units=200.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=5000.0,
+        financial_reference=1000.0,
+        monthly_factors={1: 3.0},
+    )
+    assert result.risk_score == pytest.approx(100.0)
+    assert result.risk_level == "HIGH"
+
+
+def test_risk_synthetic_scenario_a_stockout_emergency():
+    result = _risk_components(
+        mean_demand=10.0,
+        std_dev=3.0,
+        current_inventory=10.0,
+        unit_cost=5.0,
+        selling_price=10.0,
+        lead_time_days=14.0,
+        planning_horizon=30.0,
+        service_level=0.95,
+        cv=0.5,
+        trend_strength=0.2,
+        trend="INCREASING",
+        stockout_prob=0.9,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=200.0,
+        financial_reference=1000.0,
+        monthly_factors={1: 2.0},
+    )
+    assert result.component_scores.stockout_exposure == pytest.approx(90.0)
+    assert result.risk_score >= 40
+    assert result.risk_level == "MEDIUM"
+
+
+def test_risk_synthetic_scenario_b_overstock_emergency():
+    result = _risk_components(
+        mean_demand=10.0,
+        std_dev=1.0,
+        current_inventory=500.0,
+        unit_cost=5.0,
+        selling_price=10.0,
+        lead_time_days=7.0,
+        planning_horizon=30.0,
+        service_level=0.95,
+        cv=0.1,
+        trend_strength=-0.3,
+        trend="DECREASING",
+        stockout_prob=0.0,
+        excess_units=300.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=0.0,
+        financial_reference=1000.0,
+    )
+    assert result.component_scores.excess_inventory == pytest.approx(100.0)
+    assert result.component_scores.demand_trend == pytest.approx(30.0)
+    assert result.risk_score >= 20
+    assert result.risk_level == "LOW"
+
+
+def test_risk_synthetic_scenario_c_expensive_but_healthy():
+    result = _risk_components(
+        mean_demand=10.0,
+        std_dev=1.0,
+        current_inventory=120.0,
+        unit_cost=100.0,
+        selling_price=120.0,
+        lead_time_days=7.0,
+        planning_horizon=30.0,
+        service_level=0.95,
+        cv=0.1,
+        trend_strength=0.0,
+        trend="STABLE",
+        stockout_prob=0.05,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=0.0,
+        financial_reference=10000.0,
+    )
+    assert result.risk_level == "LOW"
+
+
+def test_risk_synthetic_scenario_d_cheap_but_chaotic():
+    result = _risk_components(
+        mean_demand=10.0,
+        std_dev=10.0,
+        current_inventory=30.0,
+        unit_cost=1.0,
+        selling_price=2.0,
+        lead_time_days=7.0,
+        planning_horizon=30.0,
+        service_level=0.95,
+        cv=1.0,
+        trend_strength=0.0,
+        trend="STABLE",
+        stockout_prob=0.6,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=0.0,
+        financial_reference=100.0,
+        monthly_factors={1: 2.0},
+    )
+    assert result.component_scores.demand_volatility == pytest.approx(50.0)
+    assert result.risk_score >= 20
+    assert result.risk_level in ("LOW", "MEDIUM")
+
+
+def test_risk_synthetic_scenario_e_growing_product():
+    result = _risk_components(
+        mean_demand=10.0,
+        std_dev=2.0,
+        current_inventory=40.0,
+        unit_cost=5.0,
+        selling_price=10.0,
+        lead_time_days=10.0,
+        planning_horizon=30.0,
+        service_level=0.95,
+        cv=0.2,
+        trend_strength=0.4,
+        trend="INCREASING",
+        stockout_prob=0.7,
+        excess_units=0.0,
+        target_stock=100.0,
+        reorder_point=80.0,
+        revenue_at_risk=0.0,
+        financial_reference=1000.0,
+    )
+    assert result.component_scores.demand_trend == pytest.approx(40.0)
+    assert result.risk_score >= 30
+    assert result.risk_level in ("LOW", "MEDIUM")
+
+
+def test_risk_weights_are_locked_structure():
+    from analysis import COMPONENT_WEIGHTS
+    assert "stockout_exposure" in COMPONENT_WEIGHTS
+    assert COMPONENT_WEIGHTS["stockout_exposure"] == pytest.approx(0.30)
+    assert COMPONENT_WEIGHTS["demand_volatility"] == pytest.approx(0.20)
+    assert COMPONENT_WEIGHTS["demand_trend"] == pytest.approx(0.15)
+    assert COMPONENT_WEIGHTS["excess_inventory"] == pytest.approx(0.15)
+    assert COMPONENT_WEIGHTS["financial_exposure"] == pytest.approx(0.10)
+    assert COMPONENT_WEIGHTS["seasonality"] == pytest.approx(0.10)
+    assert abs(sum(COMPONENT_WEIGHTS.values()) - 1.0) < 1e-9
 
