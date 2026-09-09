@@ -15,6 +15,7 @@ MODULES = [
     "recommendation",
     "scenario",
     "gemini",
+    "gemini_config",
     "app",
 ]
 
