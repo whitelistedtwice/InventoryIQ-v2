@@ -55,6 +55,91 @@ def _load_sample_data() -> pd.DataFrame:
     return pd.DataFrame()
 
 
+@st.cache_resource
+def _load_mock_data() -> pd.DataFrame:
+    import random
+    from datetime import datetime as dt
+
+    random.seed(42)
+    base_date = dt(2025, 1, 1)
+    rows = []
+
+    products = [
+        {
+            "product": "Widget A",
+            "category": "Electronics",
+            "inventory": 40,
+            "units_sold_base": 25,
+            "unit_cost": 10.0,
+            "selling_price": 20.0,
+            "supplier": "Supplier X",
+            "lead_time_days": 14,
+        },
+        {
+            "product": "Widget B",
+            "category": "Electronics",
+            "inventory": 500,
+            "units_sold_base": 5,
+            "unit_cost": 8.0,
+            "selling_price": 15.0,
+            "supplier": "Supplier Y",
+            "lead_time_days": 7,
+        },
+        {
+            "product": "Widget C",
+            "category": "General",
+            "inventory": 120,
+            "units_sold_base": 10,
+            "unit_cost": 5.0,
+            "selling_price": 10.0,
+            "supplier": "Supplier Z",
+            "lead_time_days": 7,
+        },
+        {
+            "product": "Widget D",
+            "category": "General",
+            "inventory": 200,
+            "units_sold_base": 0,
+            "unit_cost": 6.0,
+            "selling_price": 12.0,
+            "supplier": "Supplier X",
+            "lead_time_days": 7,
+        },
+        {
+            "product": "Widget E",
+            "category": "General",
+            "inventory": 80,
+            "units_sold_base": 10,
+            "unit_cost": 7.0,
+            "selling_price": 14.0,
+            "supplier": "Supplier Y",
+            "lead_time_days": 10,
+        },
+    ]
+
+    for i in range(15):
+        date = base_date + timedelta(days=i)
+        for p in products:
+            if p["product"] == "Widget E":
+                units_sold = max(0, int(random.gauss(p["units_sold_base"], 8)))
+            else:
+                units_sold = max(0, int(random.gauss(p["units_sold_base"], 2)))
+            rows.append({
+                "id": len(rows) + 1,
+                "date": date.strftime("%Y-%m-%d"),
+                "product": p["product"],
+                "category": p["category"],
+                "inventory": p["inventory"],
+                "units_sold": units_sold,
+                "unit_cost": p["unit_cost"],
+                "selling_price": p["selling_price"],
+                "supplier": p["supplier"],
+                "lead_time_days": p["lead_time_days"],
+            })
+
+    return pd.DataFrame(rows)
+
+
 def _safe_float(value: Optional[float]) -> Optional[float]:
     if value is None or (isinstance(value, float) and (value != value)):
         return None
@@ -224,10 +309,10 @@ def _render_inventory_health(products: List[Dict[str, Any]]) -> None:
         st.metric("Products at Risk", f"{products_at_risk} / {total}")
     with col3:
         stockout = overall.total_stockout_exposure
-        st.metric("Stockout Exposure", _format_currency(stockout))
+        st.metric("Estimated Stockout Exposure", _format_currency(stockout))
     with col4:
         excess = overall.total_excess_inventory_value
-        st.metric("Excess Inventory", _format_currency(excess))
+        st.metric("Estimated Excess Inventory", _format_currency(excess))
     col5, col6 = st.columns(2)
     with col5:
         capital = overall.total_capital_tied_up
@@ -235,7 +320,7 @@ def _render_inventory_health(products: List[Dict[str, Any]]) -> None:
     with col6:
         revenue = overall.total_revenue_at_risk
         profit = overall.total_profit_at_risk
-        st.metric("Revenue / Profit Risk", f"{_format_currency(revenue)} / {_format_currency(profit)}")
+        st.metric("Estimated Revenue / Profit Risk", f"{_format_currency(revenue)} / {_format_currency(profit)}")
 
 
 def _render_top_priorities(products: List[Dict[str, Any]]) -> None:
@@ -250,30 +335,42 @@ def _render_top_priorities(products: List[Dict[str, Any]]) -> None:
             continue
         prioritized.append({
             "product": p["product"],
+            "category": p["category"],
             "action": rec.action,
             "priority": rec.priority,
             "reasons": rec.reasons,
+            "evidence": rec.evidence,
             "reorder_quantity": rec.reorder_quantity,
             "risk_score": _safe_float(p["risk"].risk_score),
             "risk_level": p["risk"].risk_level,
         })
     prioritized.sort(key=lambda x: (PRIORITY_ORDER.get(x["priority"], 99), -(x["risk_score"] or 0)))
+    if not prioritized:
+        st.info("All products are healthy or data is insufficient for recommendations.")
+        return
     for idx, item in enumerate(prioritized[:10], 1):
         action_color = PRIORITY_ACTION_COLORS.get(item["action"], "#6b7280")
         with st.container():
-            col1, col2, col3 = st.columns([1, 3, 2])
-            with col1:
+            col_header, col_body, col_meta = st.columns([1, 3, 2])
+            with col_header:
                 st.markdown(f"<span style='color:{action_color}; font-weight:bold; font-size:1.1rem;'>{item['action']}</span>", unsafe_allow_html=True)
                 st.caption(f"#{idx} {item['priority']}")
-            with col2:
-                st.markdown(f"**{item['product']}**")
-                for reason in item["reasons"][:3]:
-                    st.caption(reason)
-            with col3:
-                if item["reorder_quantity"] is not None:
-                    st.metric("Reorder Qty", f"{item['reorder_quantity']:.1f}")
                 if item["risk_level"]:
-                    st.caption(f"Risk: {item['risk_level']}")
+                    risk_color = "#dc2626" if item["risk_level"] == "HIGH" else "#f59e0b" if item["risk_level"] == "MEDIUM" else "#10b981"
+                    st.markdown(f"<span style='color:{risk_color}; font-size:0.85rem;'>{item['risk_level']}</span>", unsafe_allow_html=True)
+            with col_body:
+                st.markdown(f"**{item['product']}** ({item['category'] or 'N/A'})")
+                for reason in item["reasons"][:4]:
+                    st.caption(f"• {reason}")
+            with col_meta:
+                if item["reorder_quantity"] is not None:
+                    st.metric("Est. Reorder Qty", f"{item['reorder_quantity']:.1f}", help="Estimated reorder quantity from backend planning")
+                stockout_prob = item.get("evidence", {}).get("stockout_probability")
+                if stockout_prob is not None:
+                    st.caption(f"Stockout prob: {_format_percent(stockout_prob)}")
+                excess_units = item.get("evidence", {}).get("excess_units")
+                if excess_units is not None and excess_units > 0:
+                    st.caption(f"Excess units: {excess_units:.1f}")
             st.divider()
 
 
@@ -616,7 +713,12 @@ def main() -> None:
     with st.sidebar:
         st.header("Data Input")
         uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
-        use_sample = st.checkbox("Use sample data", value=True)
+        data_source = st.radio(
+            "Data source",
+            ["Sample data", "Mock demo data"],
+            index=0,
+            help="Use sample data or mock demo data to explore all product states.",
+        )
 
     raw_df = pd.DataFrame()
     if uploaded_file is not None:
@@ -625,8 +727,10 @@ def main() -> None:
         except Exception as exc:
             st.error(f"Failed to read CSV: {exc}")
             st.stop()
-    elif use_sample:
+    elif data_source == "Sample data":
         raw_df = _load_sample_data()
+    else:
+        raw_df = _load_mock_data()
 
     if raw_df.empty:
         st.info("Upload a CSV file or enable sample data to begin.")
