@@ -169,6 +169,7 @@ def _init_session_state() -> None:
         "scenario_result": None,
         "ai_brief": None,
         "ai_brief_error": None,
+        "navigate_to": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -474,6 +475,7 @@ def _render_product_explorer(products: List[Dict[str, Any]]) -> None:
     if not products:
         st.info("No products to display.")
         return
+
     rows = []
     for p in products:
         risk_score = _safe_float(p["risk"].risk_score)
@@ -488,6 +490,11 @@ def _render_product_explorer(products: List[Dict[str, Any]]) -> None:
             main_issue = "Low demand"
         elif action == "MONITOR":
             main_issue = "Volatility / trend"
+        stockout_prob = _safe_float(p["planning"].stockout_probability)
+        excess_units = _safe_float(p["financial"].excess_units)
+        excess_ratio = None
+        if excess_units is not None and _safe_float(p["financial"].target_stock) is not None and _safe_float(p["financial"].target_stock) > 0:
+            excess_ratio = excess_units / _safe_float(p["financial"].target_stock)
         rows.append({
             "Product": p["product"],
             "Category": p["category"] or "N/A",
@@ -495,9 +502,92 @@ def _render_product_explorer(products: List[Dict[str, Any]]) -> None:
             "Risk Level": risk_level,
             "Action": action,
             "Main Issue": main_issue,
+            "Stockout Prob": stockout_prob,
+            "Excess Units": excess_units,
+            "Excess Ratio": excess_ratio,
         })
     explorer_df = pd.DataFrame(rows)
-    st.dataframe(explorer_df, use_container_width=True, hide_index=True)
+
+    with st.form("product_explorer_filters"):
+        col_search, col_sort = st.columns([2, 1])
+        with col_search:
+            search = st.text_input("Search products", value="", placeholder="Type to search...")
+        with col_sort:
+            sort_by = st.selectbox(
+                "Sort by",
+                ["Risk Score", "Product", "Priority"],
+                index=0,
+            )
+        col_risk, col_category, col_stockout, col_excess = st.columns(4)
+        with col_risk:
+            risk_filter = st.multiselect(
+                "Risk Level",
+                ["LOW", "MEDIUM", "HIGH"],
+                default=[],
+                help="Filter by risk level.",
+            )
+        with col_category:
+            category_filter = st.multiselect(
+                "Category",
+                sorted(explorer_df["Category"].unique().tolist()),
+                default=[],
+                help="Filter by category.",
+            )
+        with col_stockout:
+            stockout_filter = st.multiselect(
+                "Stockout Risk",
+                ["Stockout risk", "No stockout risk"],
+                default=[],
+                help="Filter by stockout exposure.",
+            )
+        with col_excess:
+            excess_filter = st.multiselect(
+                "Excess Inventory",
+                ["Excess inventory", "No excess inventory"],
+                default=[],
+                help="Filter by excess inventory status.",
+            )
+        apply_filters = st.form_submit_button("Apply Filters", use_container_width=True)
+
+    filtered_df = explorer_df.copy()
+    if search:
+        search_lower = search.lower()
+        filtered_df = filtered_df[filtered_df["Product"].str.lower().str.contains(search_lower, na=False)]
+    if risk_filter:
+        filtered_df = filtered_df[filtered_df["Risk Level"].isin(risk_filter)]
+    if category_filter:
+        filtered_df = filtered_df[filtered_df["Category"].isin(category_filter)]
+    if "Stockout risk" in stockout_filter and "No stockout risk" not in stockout_filter:
+        filtered_df = filtered_df[filtered_df["Main Issue"] == "Stockout risk"]
+    elif "No stockout risk" in stockout_filter and "Stockout risk" not in stockout_filter:
+        filtered_df = filtered_df[filtered_df["Main Issue"] != "Stockout risk"]
+    if "Excess inventory" in excess_filter and "No excess inventory" not in excess_filter:
+        filtered_df = filtered_df[filtered_df["Main Issue"] == "Excess inventory"]
+    elif "No excess inventory" in excess_filter and "Excess inventory" not in excess_filter:
+        filtered_df = filtered_df[filtered_df["Main Issue"] != "Excess inventory"]
+
+    if sort_by == "Risk Score":
+        filtered_df = filtered_df.sort_values("Risk Score", ascending=False)
+    elif sort_by == "Product":
+        filtered_df = filtered_df.sort_values("Product")
+    elif sort_by == "Priority":
+        priority_map = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "NONE": 4}
+        filtered_df = filtered_df.copy()
+        filtered_df["_priority_sort"] = filtered_df["Action"].map(priority_map).fillna(99)
+        filtered_df = filtered_df.sort_values(["_priority_sort", "Risk Score"], ascending=[True, False]).drop(columns=["_priority_sort"])
+
+    display_df = filtered_df[["Product", "Category", "Risk Score", "Risk Level", "Action", "Main Issue"]].reset_index(drop=True)
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    product_names = filtered_df["Product"].tolist()
+    if product_names:
+        selected = st.selectbox("Select a product to view details", product_names, index=0 if product_names else None)
+        if selected and st.button("View Product Deep Dive", type="primary"):
+            st.session_state.selected_product = selected
+            st.session_state.navigate_to = "Product Deep Dive"
+            st.rerun()
+    else:
+        st.info("No products match the current filters.")
 
 
 def _render_category_analysis(products: List[Dict[str, Any]]) -> None:
@@ -540,7 +630,12 @@ def _render_product_deep_dive(products: List[Dict[str, Any]]) -> None:
         st.info("No products available.")
         return
     product_names = [p["product"] for p in products]
-    selected = st.selectbox("Select a product", product_names, index=0 if product_names else None)
+    default_index = 0
+    if st.session_state.selected_product in product_names:
+        default_index = product_names.index(st.session_state.selected_product)
+        st.session_state.selected_product = None
+        st.session_state.navigate_to = None
+    selected = st.selectbox("Select a product", product_names, index=default_index if product_names else None)
     if not selected:
         return
     product = next((p for p in products if p["product"] == selected), None)
@@ -753,20 +848,33 @@ def main() -> None:
     products = _run_pipeline(filtered_df)
     st.session_state.products = products
 
-    section = st.sidebar.radio(
-        "Navigate",
-        [
-            "Inventory Health",
-            "Top Priorities",
-            "AI Business Brief",
-            "Product Explorer",
-            "Category Analysis",
-            "Product Deep Dive",
-            "Historical Analysis",
-            "What-If Scenarios",
-        ],
-        index=0,
-    )
+    section = st.session_state.get("navigate_to")
+    if section not in [
+        "Inventory Health",
+        "Top Priorities",
+        "AI Business Brief",
+        "Product Explorer",
+        "Category Analysis",
+        "Product Deep Dive",
+        "Historical Analysis",
+        "What-If Scenarios",
+    ]:
+        section = st.sidebar.radio(
+            "Navigate",
+            [
+                "Inventory Health",
+                "Top Priorities",
+                "AI Business Brief",
+                "Product Explorer",
+                "Category Analysis",
+                "Product Deep Dive",
+                "Historical Analysis",
+                "What-If Scenarios",
+            ],
+            index=0,
+        )
+    else:
+        st.session_state.navigate_to = None
 
     if section == "Inventory Health":
         _render_inventory_health(products)
