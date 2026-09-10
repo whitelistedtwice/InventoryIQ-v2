@@ -7,6 +7,7 @@ import streamlit as st
 
 from analysis import (
     OverallHealthResult,
+    analyze_seasonality,
     calculate_category_risk,
     calculate_demand_statistics,
     calculate_financial_and_excess_metrics,
@@ -14,6 +15,7 @@ from analysis import (
     calculate_overall_health,
     calculate_product_risk,
     calculate_trend,
+    detect_outliers,
 )
 from gemini import ExecutiveSummaryRequest, ProductContext, get_executive_summary, get_product_explanation
 from gemini_config import is_gemini_configured
@@ -240,6 +242,8 @@ def _run_pipeline(df: pd.DataFrame) -> List[Dict[str, Any]]:
         demand_series = group["units_sold"].fillna(0)
         demand_stats = calculate_demand_statistics(demand_series)
         trend_result = calculate_trend(demand_series)
+        outlier_result = detect_outliers(demand_series)
+        pattern_result = analyze_seasonality(demand_series)
         mean_demand = _safe_float(demand_stats.mean) or 0.0
         std_dev = _safe_float(demand_stats.std_dev) or 0.0
         current_inventory = _safe_float(last_row.get("inventory"))
@@ -260,8 +264,17 @@ def _run_pipeline(df: pd.DataFrame) -> List[Dict[str, Any]]:
             selling_price=selling_price,
             lead_time_days=lead_time_days,
         )
-        pattern = type("PatternResult", (), {"weekday_factors": None, "monthly_factors": None, "monthly_pattern_label": None})()
-        products.append(_build_product_result(last_row, demand_stats, trend_result, planning, financial, pattern))
+        product = _build_product_result(last_row, demand_stats, trend_result, planning, financial, pattern_result)
+        product["outlier_result"] = outlier_result
+        product["inventory_history"] = list(zip(
+            pd.to_datetime(group["date"]).dt.strftime("%Y-%m-%d").tolist(),
+            group["inventory"].fillna(0).tolist(),
+        ))
+        product["demand_history"] = list(zip(
+            pd.to_datetime(group["date"]).dt.strftime("%Y-%m-%d").tolist(),
+            demand_series.tolist(),
+        ))
+        products.append(product)
     return products
 
 
@@ -641,21 +654,152 @@ def _render_product_deep_dive(products: List[Dict[str, Any]]) -> None:
     product = next((p for p in products if p["product"] == selected), None)
     if not product:
         return
+
+    risk_score = _safe_float(product["risk"].risk_score)
+    risk_level = product["risk"].risk_level or "N/A"
+    rec = product["recommendation"]
+
+    # Header
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Mean Demand", f"{_safe_float(product['demand_stats'].mean):.2f}" if _safe_float(product['demand_stats'].mean) is not None else "N/A")
-        st.metric("CV", f"{_safe_float(product['demand_stats'].cv):.2f}" if _safe_float(product['demand_stats'].cv) is not None else "N/A")
+        st.metric("Product", selected)
+        st.caption(f"Category: {product['category'] or 'N/A'}")
     with col2:
-        st.metric("Days Remaining", f"{_safe_float(product['planning'].days_remaining):.1f}" if _safe_float(product['planning'].days_remaining) is not None else "N/A")
-        st.metric("Stockout Probability", _format_percent(_safe_float(product['planning'].stockout_probability)))
+        st.metric("Risk Score", f"{risk_score:.1f}" if risk_score is not None else "N/A")
+        st.metric("Risk Level", risk_level)
     with col3:
-        st.metric("Risk Score", f"{_safe_float(product['risk'].risk_score):.1f}" if _safe_float(product['risk'].risk_score) is not None else "N/A")
-        st.metric("Risk Level", product["risk"].risk_level or "N/A")
-    st.markdown("**Recommendation**")
-    rec = product["recommendation"]
-    st.markdown(f"**{rec.action}** — {rec.priority}")
-    for reason in rec.reasons[:5]:
-        st.caption(reason)
+        action_color = PRIORITY_ACTION_COLORS.get(rec.action, "#6b7280")
+        st.markdown(f"<span style='color:{action_color}; font-weight:bold; font-size:1.2rem;'>{rec.action}</span>", unsafe_allow_html=True)
+        st.caption(f"Priority: {rec.priority}")
+
+    st.divider()
+
+    # Demand
+    st.markdown("### Demand")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.caption("**Observed**")
+        mean = _safe_float(product["demand_stats"].mean)
+        median = _safe_float(product["demand_stats"].median)
+        min_d = _safe_float(product["demand_stats"].min)
+        max_d = _safe_float(product["demand_stats"].max)
+        zero_days = product["demand_stats"].zero_demand_days
+        st.metric("Mean Demand", f"{mean:.2f}" if mean is not None else "N/A")
+        st.metric("Median Demand", f"{median:.2f}" if median is not None else "N/A")
+        st.metric("Min / Max", f"{min_d:.0f} / {max_d:.0f}" if min_d is not None and max_d is not None else "N/A")
+        st.caption(f"Zero-demand days: {zero_days if zero_days is not None else 'N/A'}")
+    with col2:
+        st.caption("**Variability**")
+        cv = _safe_float(product["demand_stats"].cv)
+        std = _safe_float(product["demand_stats"].std_dev)
+        variance = _safe_float(product["demand_stats"].variance)
+        st.metric("CV", f"{cv:.2f}" if cv is not None else "N/A")
+        st.metric("Std Dev", f"{std:.2f}" if std is not None else "N/A")
+        st.metric("Variance", f"{variance:.2f}" if variance is not None else "N/A")
+    with col3:
+        st.caption("**Trend**")
+        trend = product["trend_result"].trend or "N/A"
+        strength = _safe_float(product["trend_result"].trend_strength)
+        significant = product["trend_result"].trend_significant
+        st.metric("Trend", trend.title() if isinstance(trend, str) else str(trend))
+        st.metric("Strength", f"{strength:.3f}" if strength is not None else "N/A")
+        st.caption(f"Significant: {'Yes' if significant else 'No' if significant is not None else 'N/A'}")
+
+    pattern_label = getattr(product.get("pattern"), "monthly_pattern_label", None)
+    if pattern_label:
+        st.caption(f"Pattern: {pattern_label}")
+
+    outlier_result = product.get("outlier_result")
+    if outlier_result is not None:
+        if outlier_result.outlier_mask is not None:
+            outlier_count = int(outlier_result.outlier_mask.sum())
+            st.caption(f"Outliers: {outlier_count} (method: {outlier_result.method})")
+        elif outlier_result.warnings:
+            for warning in outlier_result.warnings[:2]:
+                st.caption(f"Outlier note: {warning}")
+
+    demand_history = product.get("demand_history", [])
+    if demand_history:
+        demand_df = pd.DataFrame(demand_history, columns=["date", "units_sold"])
+        demand_df["date"] = pd.to_datetime(demand_df["date"])
+        st.markdown("**Demand History**")
+        st.line_chart(demand_df.set_index("date")["units_sold"])
+
+    st.divider()
+
+    # Inventory
+    st.markdown("### Inventory")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.caption("**Current**")
+        current_inv = _safe_float(product["current_inventory"])
+        st.metric("Current Inventory", f"{current_inv:.0f}" if current_inv is not None else "N/A")
+    with col2:
+        st.caption("**Planning Estimates**")
+        safety_stock = _safe_float(product["planning"].safety_stock)
+        reorder_point = _safe_float(product["planning"].reorder_point)
+        days_remaining = _safe_float(product["planning"].days_remaining)
+        st.metric("Safety Stock", f"{safety_stock:.1f}" if safety_stock is not None else "N/A")
+        st.metric("Reorder Point (ROP)", f"{reorder_point:.1f}" if reorder_point is not None else "N/A")
+        st.metric("Days Remaining", f"{days_remaining:.1f}" if days_remaining is not None else "N/A")
+    with col3:
+        st.caption("**Stockout Risk**")
+        stockout_prob = _safe_float(product["planning"].stockout_probability)
+        st.metric("Stockout Probability", _format_percent(stockout_prob))
+
+    inventory_history = product.get("inventory_history", [])
+    if inventory_history:
+        inv_df = pd.DataFrame(inventory_history, columns=["date", "inventory"])
+        inv_df["date"] = pd.to_datetime(inv_df["date"])
+        st.markdown("**Inventory History**")
+        st.line_chart(inv_df.set_index("date")["inventory"])
+
+    st.divider()
+
+    # Financial
+    st.markdown("### Financial Metrics")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.caption("**Inventory Value**")
+        inv_value = _safe_float(product["financial"].inventory_value)
+        capital = _safe_float(product["financial"].capital_tied_up)
+        unit_cost = _safe_float(product["unit_cost"])
+        st.metric("Inventory Value", _format_currency(inv_value))
+        st.metric("Capital Tied Up", _format_currency(capital))
+        st.metric("Unit Cost", _format_currency(unit_cost))
+    with col2:
+        st.caption("**Excess**")
+        excess_units = _safe_float(product["financial"].excess_units)
+        excess_value = _safe_float(product["financial"].excess_inventory_value)
+        st.metric("Excess Units", f"{excess_units:.1f}" if excess_units is not None else "N/A")
+        st.metric("Excess Value", _format_currency(excess_value))
+    with col3:
+        st.caption("**Revenue / Profit Exposure**")
+        revenue = _safe_float(product["financial"].revenue_at_risk)
+        profit = _safe_float(product["financial"].profit_at_risk)
+        gross_margin = _safe_float(product["financial"].gross_margin)
+        st.metric("Revenue at Risk", _format_currency(revenue))
+        st.metric("Profit at Risk", _format_currency(profit))
+        st.metric("Gross Margin", _format_percent(gross_margin))
+
+    st.divider()
+
+    # Recommendation
+    st.markdown("### Recommendation")
+    action_color = PRIORITY_ACTION_COLORS.get(rec.action, "#6b7280")
+    st.markdown(f"<span style='color:{action_color}; font-weight:bold; font-size:1.1rem;'>{rec.action}</span> — <b>{rec.priority}</b>", unsafe_allow_html=True)
+    if rec.reasons:
+        st.markdown("**Reasons:**")
+        for reason in rec.reasons[:8]:
+            st.caption(f"• {reason}")
+    if rec.evidence:
+        st.markdown("**Evidence:**")
+        for key, value in rec.evidence.items():
+            st.caption(f"• {key}: {value}")
+
+    st.divider()
+
+    # Gemini button (UI element only)
     if st.button("Ask Gemini for explanation", key=f"gemini_{selected}"):
         if not is_gemini_configured():
             st.warning("Gemini API key is not configured.")
