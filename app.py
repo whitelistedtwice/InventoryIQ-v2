@@ -266,6 +266,11 @@ def _run_pipeline(df: pd.DataFrame) -> List[Dict[str, Any]]:
         )
         product = _build_product_result(last_row, demand_stats, trend_result, planning, financial, pattern_result)
         product["outlier_result"] = outlier_result
+        outlier_dates = []
+        if outlier_result.outlier_mask is not None:
+            outlier_indices = outlier_result.outlier_mask[outlier_result.outlier_mask].index
+            outlier_dates = pd.to_datetime(group.loc[outlier_indices, "date"]).dt.strftime("%Y-%m-%d").tolist()
+        product["outlier_dates"] = outlier_dates
         product["inventory_history"] = list(zip(
             pd.to_datetime(group["date"]).dt.strftime("%Y-%m-%d").tolist(),
             group["inventory"].fillna(0).tolist(),
@@ -885,33 +890,81 @@ def _render_product_deep_dive(products: List[Dict[str, Any]]) -> None:
                 st.error(f"Gemini explanation failed: {exc}")
 
 
-def _render_historical_analysis(df: pd.DataFrame) -> None:
+def _render_historical_analysis(products: List[Dict[str, Any]], filtered_df: pd.DataFrame) -> None:
     st.subheader("Historical Analysis")
-    if df.empty:
+    if not products:
         st.info("No historical data available.")
         return
-    if "date" not in df.columns or "units_sold" not in df.columns:
-        st.info("Historical view requires date and units_sold columns.")
+
+    categories = sorted(set(p.get("category") or "Uncategorized" for p in products))
+    selected_categories = st.multiselect("Filter by category", categories, default=categories)
+    if selected_categories:
+        products = [p for p in products if (p.get("category") or "Uncategorized") in selected_categories]
+
+    if not products:
+        st.info("No products match the selected categories.")
         return
-    chart_df = df.copy()
-    chart_df["date"] = pd.to_datetime(chart_df["date"], errors="coerce")
-    chart_df = chart_df.dropna(subset=["date"]).sort_values("date")
-    if chart_df.empty:
-        st.info("No valid date data available.")
-        return
-    product_names = sorted(chart_df["product"].dropna().unique()) if "product" in chart_df.columns else []
-    selected_products = st.multiselect("Select products", product_names, default=product_names[:5] if len(product_names) > 5 else product_names)
+
+    product_names = [p["product"] for p in products]
+    default_products = product_names[:min(5, len(product_names))]
+    selected_products = st.multiselect("Select products", product_names, default=default_products)
     if not selected_products:
         st.info("Select at least one product to view historical data.")
         return
-    filtered = chart_df[chart_df["product"].isin(selected_products)]
-    daily_sales = filtered.groupby(["date", "product"])["units_sold"].sum().reset_index()
-    st.markdown("**Daily Sales Over Time**")
-    st.line_chart(daily_sales.pivot(index="date", columns="product", values="units_sold"))
-    if "inventory" in filtered.columns:
-        daily_inventory = filtered.groupby(["date", "product"])["inventory"].last().reset_index()
-        st.markdown("**Inventory Over Time**")
-        st.line_chart(daily_inventory.pivot(index="date", columns="product", values="inventory"))
+
+    selected_set = set(selected_products)
+    for product in products:
+        if product["product"] not in selected_set:
+            continue
+
+        st.markdown(f"**{product['product']}** ({product.get('category') or 'N/A'})")
+
+        demand_history = product.get("demand_history", [])
+        if demand_history:
+            demand_df = pd.DataFrame(demand_history, columns=["date", "units_sold"])
+            demand_df["date"] = pd.to_datetime(demand_df["date"])
+            demand_df = demand_df.sort_values("date").drop_duplicates(subset=["date"])
+            st.markdown("**Daily Sales**")
+            st.line_chart(demand_df.set_index("date")["units_sold"])
+
+            outlier_dates = product.get("outlier_dates", [])
+            if outlier_dates:
+                spike_df = demand_df[demand_df["date"].isin(pd.to_datetime(outlier_dates))]
+                if not spike_df.empty:
+                    st.caption("Demand spikes:")
+                    for _, row in spike_df.iterrows():
+                        st.caption(f"• {row['date'].strftime('%Y-%m-%d')}: {row['units_sold']:.0f} units")
+
+        inventory_history = product.get("inventory_history", [])
+        if inventory_history:
+            inv_df = pd.DataFrame(inventory_history, columns=["date", "inventory"])
+            inv_df["date"] = pd.to_datetime(inv_df["date"])
+            inv_df = inv_df.sort_values("date").drop_duplicates(subset=["date"])
+            st.markdown("**Inventory Level**")
+            st.line_chart(inv_df.set_index("date")["inventory"])
+
+            stockouts = inv_df[inv_df["inventory"] == 0]
+            if not stockouts.empty:
+                st.caption("Stockout events:")
+                for _, row in stockouts.iterrows():
+                    st.caption(f"• {row['date'].strftime('%Y-%m-%d')}: out of stock")
+
+            inv_df["prev_inventory"] = inv_df["inventory"].shift(1)
+            replenishments = inv_df[inv_df["inventory"] > inv_df["prev_inventory"].fillna(0) * 1.2]
+            if not replenishments.empty:
+                st.caption("Replenishment events:")
+                for _, row in replenishments.iterrows():
+                    st.caption(f"• {row['date'].strftime('%Y-%m-%d')}: inventory increased to {row['inventory']:.0f}")
+
+            safety_stock = _safe_float(product["planning"].safety_stock)
+            if safety_stock is not None:
+                breaches = inv_df[inv_df["inventory"] < safety_stock]
+                if not breaches.empty:
+                    st.caption(f"Safety-stock-breach events (below safety stock {safety_stock:.1f}):")
+                    for _, row in breaches.iterrows():
+                        st.caption(f"• {row['date'].strftime('%Y-%m-%d')}: inventory {row['inventory']:.0f}")
+
+        st.divider()
 
 
 def _render_what_if_scenarios(products: List[Dict[str, Any]]) -> None:
@@ -1079,7 +1132,7 @@ def main() -> None:
     elif section == "Product Deep Dive":
         _render_product_deep_dive(products)
     elif section == "Historical Analysis":
-        _render_historical_analysis(filtered_df)
+        _render_historical_analysis(products, filtered_df)
     elif section == "What-If Scenarios":
         _render_what_if_scenarios(products)
 
