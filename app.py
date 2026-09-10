@@ -17,7 +17,7 @@ from analysis import (
     calculate_trend,
     detect_outliers,
 )
-from gemini import ExecutiveSummaryRequest, ProductContext, get_executive_summary, get_product_explanation
+from gemini import ExecutiveSummaryRequest, GeminiFailure, GeminiResponse, ProductContext, get_executive_summary, get_product_explanation
 from gemini_config import is_gemini_configured
 from recommendation import RecommendationResult, generate_recommendation
 from scenario import run_scenario
@@ -479,16 +479,21 @@ def _render_ai_brief(products: List[Dict[str, Any]]) -> None:
         )
         try:
             response = get_executive_summary(request)
-            if isinstance(response, dict):
-                st.session_state.ai_brief = response.get("text", "")
+            if isinstance(response, GeminiFailure):
+                st.session_state.ai_brief_error = response.message
+            elif isinstance(response, GeminiResponse):
+                st.session_state.ai_brief = response.text
             else:
                 st.session_state.ai_brief = getattr(response, "text", "")
         except Exception as exc:
             st.session_state.ai_brief_error = str(exc)
     if st.session_state.ai_brief_error:
-        st.error(f"AI brief failed: {st.session_state.ai_brief_error}")
+        st.error(f"AI brief is unavailable: {st.session_state.ai_brief_error}")
     elif st.session_state.ai_brief:
-        st.success(st.session_state.ai_brief)
+        st.caption("**AI Executive Summary** — verified backend context only")
+        bullets = [line.strip() for line in st.session_state.ai_brief.splitlines() if line.strip()]
+        for bullet in bullets[:8]:
+            st.caption(f"• {bullet}")
     else:
         with st.spinner("Generating AI business brief..."):
             st.empty()
@@ -888,8 +893,10 @@ def _render_product_deep_dive(products: List[Dict[str, Any]]) -> None:
             )
             try:
                 explanation = get_product_explanation(context)
-                if isinstance(explanation, dict):
-                    st.info(explanation.get("text", ""))
+                if isinstance(explanation, GeminiFailure):
+                    st.warning(f"Gemini explanation unavailable: {explanation.message}")
+                elif isinstance(explanation, GeminiResponse):
+                    st.info(explanation.text)
                 else:
                     st.info(getattr(explanation, "text", ""))
             except Exception as exc:
