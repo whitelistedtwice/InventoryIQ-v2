@@ -160,6 +160,12 @@ def _format_percent(value: Optional[float]) -> str:
     return f"{value:.1%}"
 
 
+def _format_delta(value: Optional[float]) -> Optional[str]:
+    if value is None:
+        return None
+    return f"{value:+.1f}"
+
+
 def _init_session_state() -> None:
     defaults = {
         "raw_df": pd.DataFrame(),
@@ -1010,14 +1016,47 @@ def _render_what_if_scenarios(products: List[Dict[str, Any]]) -> None:
         baseline = scenario.baseline
         scen = scenario.scenario
         deltas = scenario.deltas
+
+        st.markdown("**Baseline vs Scenario**")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("*Baseline*")
+            st.metric("Risk Score", f"{_safe_float(baseline.risk.risk_score):.1f}" if _safe_float(baseline.risk.risk_score) is not None else "N/A")
+            st.metric("Risk Level", baseline.risk.risk_level or "N/A")
+            st.metric("Recommendation", baseline.recommendation.action or "N/A")
+            st.caption(f"Priority: {baseline.recommendation.priority}")
+        with col2:
+            st.markdown("*Scenario*")
+            st.metric("Risk Score", f"{_safe_float(scen.risk.risk_score):.1f}" if _safe_float(scen.risk.risk_score) is not None else "N/A")
+            st.metric("Risk Level", scen.risk.risk_level or "N/A")
+            st.metric("Recommendation", scen.recommendation.action or "N/A")
+            st.caption(f"Priority: {scen.recommendation.priority}")
+
+        st.markdown("**Impact Summary**")
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Baseline Risk Score", f"{_safe_float(baseline.risk.risk_score):.1f}" if _safe_float(baseline.risk.risk_score) is not None else "N/A")
+            st.caption("**Planning**")
+            st.metric("Safety Stock", f"{_safe_float(scen.planning.safety_stock):.1f}" if _safe_float(scen.planning.safety_stock) is not None else "N/A", delta=_format_delta(deltas.safety_stock))
+            st.metric("Reorder Point", f"{_safe_float(scen.planning.reorder_point):.1f}" if _safe_float(scen.planning.reorder_point) is not None else "N/A", delta=_format_delta(deltas.reorder_point))
+            st.metric("Days Remaining", f"{_safe_float(scen.planning.days_remaining):.1f}" if _safe_float(scen.planning.days_remaining) is not None else "N/A", delta=_format_delta(deltas.days_remaining))
         with col2:
-            st.metric("Scenario Risk Score", f"{_safe_float(scen.risk.risk_score):.1f}" if _safe_float(scen.risk.risk_score) is not None else "N/A")
+            st.caption("**Financial**")
+            st.metric("Excess Units", f"{_safe_float(scen.financial.excess_units):.1f}" if _safe_float(scen.financial.excess_units) is not None else "N/A", delta=_format_delta(deltas.excess_units))
+            st.metric("Excess Value", _format_currency(_safe_float(scen.financial.excess_inventory_value)), delta=_format_delta(deltas.excess_inventory_value))
+            st.metric("Revenue at Risk", _format_currency(_safe_float(scen.financial.revenue_at_risk)), delta=_format_delta(deltas.revenue_at_risk))
         with col3:
-            delta = _safe_float(deltas.risk_score)
-            st.metric("Risk Delta", f"{delta:+.1f}" if delta is not None else "N/A")
+            st.caption("**Stockout / Profit**")
+            st.metric("Stockout Probability", _format_percent(_safe_float(scen.planning.stockout_probability)), delta=_format_delta(deltas.stockout_probability))
+            st.metric("Profit at Risk", _format_currency(_safe_float(scen.financial.profit_at_risk)), delta=_format_delta(deltas.profit_at_risk))
+            st.metric("Risk Score", f"{_safe_float(scen.risk.risk_score):.1f}" if _safe_float(scen.risk.risk_score) is not None else "N/A", delta=_format_delta(deltas.risk_score))
+
+        st.markdown("**Causal Chain**")
+        st.caption(f"Demand change: {demand_change:+d}% → scenario mean demand = {_safe_float(scen.planning.lead_time_demand):.1f if _safe_float(scen.planning.lead_time_demand) is not None else 'N/A'} units")
+        st.caption(f"Lead time change: {lead_time_change:+d} days → scenario lead time = {_safe_float(product.get('lead_time_days')) + lead_time_change if _safe_float(product.get('lead_time_days')) is not None else 'N/A'} days")
+        if deltas.risk_score is not None:
+            direction = "increases" if deltas.risk_score > 0 else "decreases" if deltas.risk_score < 0 else "unchanged"
+            st.caption(f"Risk score {direction} by {abs(deltas.risk_score):.1f} points under this scenario.")
+
         if st.button("Reset Scenario"):
             st.session_state.scenario_result = None
             st.rerun()
