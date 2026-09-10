@@ -608,33 +608,79 @@ def _render_category_analysis(products: List[Dict[str, Any]]) -> None:
     if not products:
         st.info("No category data available.")
         return
-    category_map: Dict[str, List[Dict[str, Any]]] = {}
-    for p in products:
-        cat = p["category"] or "Uncategorized"
-        category_map.setdefault(cat, []).append(p)
+
+    category_products = [
+        {
+            "category": p["category"],
+            "risk_score": _safe_float(p["risk"].risk_score),
+            "risk_level": p["risk"].risk_level,
+            "inventory_value": _safe_float(p["financial"].inventory_value),
+            "capital_tied_up": _safe_float(p["financial"].capital_tied_up),
+            "shortage_units": max(0.0, _safe_float(p["planning"].lead_time_demand) - _safe_float(p["current_inventory"])) if _safe_float(p["planning"].lead_time_demand) is not None and _safe_float(p["current_inventory"]) is not None else None,
+            "selling_price": _safe_float(p["selling_price"]),
+            "excess_inventory_value": _safe_float(p["financial"].excess_inventory_value),
+            "cv": _safe_float(p["demand_stats"].cv),
+        }
+        for p in products
+        if p["risk"].risk_score is not None
+    ]
+
+    category_results = calculate_category_risk(category_products)
+
+    if not category_results:
+        st.info("No valid category data available.")
+        return
+
     rows = []
-    for category, items in category_map.items():
-        risk_scores = [_safe_float(i["risk"].risk_score) for i in items if _safe_float(i["risk"].risk_score) is not None]
-        avg_risk = float(sum(risk_scores) / len(risk_scores)) if risk_scores else None
-        stockout_exposure = sum(_safe_float(i["financial"].revenue_at_risk) or 0 for i in items)
-        excess_value = sum(_safe_float(i["financial"].excess_inventory_value) or 0 for i in items)
-        inventory_value = sum(_safe_float(i["financial"].inventory_value) or 0 for i in items)
-        risk_level = "LOW"
-        if avg_risk is not None:
-            if avg_risk >= 70:
-                risk_level = "HIGH"
-            elif avg_risk >= 40:
-                risk_level = "MEDIUM"
+    for category, result in category_results.items():
+        risk_score = _safe_float(result.risk_score)
+        avg_risk = _safe_float(result.average_product_risk_score)
+        risk_level = result.risk_level or "N/A"
+        risk_color = "#6b7280"
+        if risk_level == "HIGH":
+            risk_color = "#dc2626"
+        elif risk_level == "MEDIUM":
+            risk_color = "#f59e0b"
+        elif risk_level == "LOW":
+            risk_color = "#10b981"
+
         rows.append({
             "Category": category,
-            "Products": len(items),
-            "Avg Risk": f"{avg_risk:.1f}" if avg_risk is not None else "N/A",
+            "Products": result.product_count,
+            "High-Risk Products": result.high_risk_product_count,
+            "Avg Product Risk": f"{avg_risk:.1f}" if avg_risk is not None else "N/A",
+            "Category Risk": f"{risk_score:.1f}" if risk_score is not None else "N/A",
             "Risk Level": risk_level,
-            "Stockout Exposure": _format_currency(stockout_exposure),
-            "Excess Inventory": _format_currency(excess_value),
-            "Inventory Value": _format_currency(inventory_value),
+            "Inventory Value": _format_currency(result.category_inventory_value),
+            "Capital Tied Up": _format_currency(result.category_capital_tied_up),
+            "Stockout Exposure": _format_currency(result.category_stockout_exposure),
+            "Excess Inventory": _format_currency(result.category_excess_inventory_value),
+            "Demand Volatility": f"{result.category_demand_volatility:.2f}" if result.category_demand_volatility is not None else "N/A",
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        if result.warnings:
+            for warning in result.warnings[:2]:
+                st.caption(f"{category}: {warning}")
+
+    results_df = pd.DataFrame(rows)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Category Comparison Table**")
+        display_cols = ["Category", "Products", "High-Risk Products", "Category Risk", "Risk Level", "Demand Volatility"]
+        st.dataframe(results_df[display_cols], use_container_width=True, hide_index=True)
+    with col2:
+        st.markdown("**Financial Metrics by Category**")
+        financial_cols = ["Category", "Inventory Value", "Capital Tied Up", "Stockout Exposure", "Excess Inventory"]
+        st.dataframe(results_df[financial_cols], use_container_width=True, hide_index=True)
+
+    st.markdown("**Category Risk Comparison**")
+    if not results_df.empty and "Category Risk" in results_df.columns:
+        chart_data = results_df[["Category", "Category Risk", "High-Risk Products"]].copy()
+        chart_data["Category Risk"] = pd.to_numeric(chart_data["Category Risk"], errors="coerce")
+        chart_data = chart_data.dropna(subset=["Category Risk"])
+        if not chart_data.empty:
+            st.bar_chart(chart_data.set_index("Category")["Category Risk"])
 
 
 def _render_product_deep_dive(products: List[Dict[str, Any]]) -> None:
