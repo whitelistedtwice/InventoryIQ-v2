@@ -585,6 +585,9 @@ def _normalize_excess(
         return None, warnings
     if excess_units <= 0:
         return 0.0, warnings
+    if target_stock <= 0:
+        warnings.append("Target stock is zero or negative; excess component excluded.")
+        return None, warnings
     ratio = excess_units / target_stock
     return min(ratio * 100, 100), warnings
 

@@ -22,6 +22,7 @@ from analysis import (
     calculate_product_risk,
     calculate_category_risk,
     calculate_overall_health,
+    _normalize_excess,
 )
 
 
@@ -1610,4 +1611,84 @@ def test_consistency_product_category_overall():
     assert category_a.risk_level == "HIGH"
     assert category_b.risk_level == "LOW"
     assert overall.overall_health_status == "ATTENTION"
+
+
+def test_normalize_excess_zero_target_stock_positive_inventory():
+    score, warnings = _normalize_excess(
+        current_inventory=100.0,
+        target_stock=0.0,
+        excess_units=100.0,
+    )
+    assert score is None
+    assert any("zero or negative" in warning.lower() for warning in warnings)
+
+
+def test_normalize_excess_zero_target_stock_zero_inventory():
+    score, warnings = _normalize_excess(
+        current_inventory=0.0,
+        target_stock=0.0,
+        excess_units=0.0,
+    )
+    assert score == pytest.approx(0.0)
+    assert warnings == []
+
+
+def test_normalize_excess_positive_target_stock_preserves_formula():
+    score, warnings = _normalize_excess(
+        current_inventory=120.0,
+        target_stock=100.0,
+        excess_units=20.0,
+    )
+    assert score == pytest.approx(20.0)
+    assert warnings == []
+
+
+def test_dead_stock_csv_no_crash():
+    import os
+    from data_processing import process_data
+    from validation import validate_input
+
+    filepath = os.path.join(
+        os.path.dirname(__file__), "..", "test_data", "dead_stock.csv"
+    )
+    df = pd.read_csv(filepath)
+    validation = validate_input(df)
+    assert validation.is_valid
+
+    processed = process_data(validation.df)
+    demand_series = processed["units_sold"]
+    inventory_series = processed["inventory"]
+
+    demand_stats = calculate_demand_statistics(demand_series)
+    trend_result = calculate_trend(demand_series)
+    current_inventory = float(inventory_series.iloc[-1])
+    lead_time_days = float(processed["lead_time_days"].iloc[-1])
+    unit_cost = float(processed["unit_cost"].iloc[-1])
+    selling_price = float(processed["selling_price"].iloc[-1])
+
+    planning = calculate_inventory_planning(
+        mean_demand=demand_stats.mean if demand_stats.mean is not None else 0.0,
+        std_dev=demand_stats.std_dev if demand_stats.std_dev is not None else 0.0,
+        current_inventory=current_inventory,
+        lead_time_days=lead_time_days,
+    )
+    financial = calculate_financial_and_excess_metrics(
+        mean_demand=demand_stats.mean if demand_stats.mean is not None else 0.0,
+        std_dev=demand_stats.std_dev if demand_stats.std_dev is not None else 0.0,
+        current_inventory=current_inventory,
+        unit_cost=unit_cost,
+        selling_price=selling_price,
+        lead_time_days=lead_time_days,
+    )
+    risk = calculate_product_risk(
+        demand_stats=demand_stats,
+        trend_result=trend_result,
+        planning_result=planning,
+        financial_result=financial,
+        pattern_result=PatternResult(),
+        current_inventory=current_inventory,
+        unit_cost=unit_cost,
+        selling_price=selling_price,
+    )
+    assert risk.risk_score is not None or risk.warnings
 
