@@ -62,3 +62,19 @@ Not lazy about: understanding the problem (read it fully and trace the real flow
 
 (Yes, this file also applies to agents working on the ponytail repo itself. Especially to them.)
 
+
+
+# InventoryIQ V2
+
+## Project Rules
+
+- Understand the existing architecture before making changes.
+- Before making significant changes, explain the planned approach and affected files.
+- Reuse existing components and functions where possible.
+- Do not modify unrelated files.
+- Do not add dependencies without a clear reason.
+- Keep frontend and backend responsibilities separated.
+- Never expose API keys or secrets.
+- Validate user-provided data at input boundaries.
+- Test non-trivial changes before considering them complete.
+- Preserve existing functionality unless the task explicitly requires changing it.
