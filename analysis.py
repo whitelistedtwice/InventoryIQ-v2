@@ -221,6 +221,10 @@ def calculate_inventory_planning(
         warnings.append("Invalid or unavailable lead time; replenishment calculations unavailable.")
         return InventoryPlanningResult(service_level=service_level, warnings=warnings)
 
+    if std_dev is None or np.isnan(std_dev):
+        warnings.append("Insufficient observations for demand variability; replenishment calculations unavailable.")
+        return InventoryPlanningResult(service_level=service_level, warnings=warnings)
+
     z_score = float(norm.ppf(service_level))
     lead_time_demand = mean_demand * float(lead_time_days)
     lead_time_sd = std_dev * float(np.sqrt(lead_time_days))
