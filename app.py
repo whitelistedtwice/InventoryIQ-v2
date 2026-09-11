@@ -279,7 +279,7 @@ def _run_pipeline(df: pd.DataFrame) -> List[Dict[str, Any]]:
         product["outlier_dates"] = outlier_dates
         product["inventory_history"] = list(zip(
             pd.to_datetime(group["date"]).dt.strftime("%Y-%m-%d").tolist(),
-            group["inventory"].fillna(0).tolist(),
+            group["inventory"].tolist(),
         ))
         product["demand_history"] = list(zip(
             pd.to_datetime(group["date"]).dt.strftime("%Y-%m-%d").tolist(),
