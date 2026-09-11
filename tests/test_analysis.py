@@ -23,6 +23,7 @@ from analysis import (
     calculate_category_risk,
     calculate_overall_health,
     _normalize_excess,
+    _normalize_seasonality,
 )
 
 
@@ -1691,4 +1692,32 @@ def test_dead_stock_csv_no_crash():
         selling_price=selling_price,
     )
     assert risk.risk_score is not None or risk.warnings
+
+
+def test_seasonality_regression_production_datetime_index():
+    """Issue 4-A regression: _run_pipeline must construct demand_series with DatetimeIndex."""
+    dates = pd.date_range("2024-01-01", periods=365, freq="D")
+    values = [(i % 7 + 1) * 3.0 for i in range(365)]
+    demand_series = pd.Series(values, index=pd.DatetimeIndex(dates))
+    assert isinstance(demand_series.index, pd.DatetimeIndex)
+    result = analyze_seasonality(demand_series)
+    assert result.weekday_pattern_available is True
+    assert result.weekday_factors is not None
+    assert len(result.weekday_factors) == 7
+    assert result.peak_weekday is not None
+    assert result.drop_weekday is not None
+    assert result.monthly_factors is not None
+    assert result.monthly_pattern_label == "Annual monthly seasonality"
+
+
+def test_seasonality_component_available_with_datetime_index():
+    """With DatetimeIndex, seasonality risk component should produce a non-None score."""
+    dates = pd.date_range("2024-01-01", periods=28, freq="D")
+    values = [5.0, 10.0, 15.0, 20.0, 5.0, 10.0, 15.0] * 4
+    demand_series = pd.Series(values, index=pd.DatetimeIndex(dates))
+    pattern = analyze_seasonality(demand_series)
+    assert pattern.weekday_factors is not None
+    score, warnings = _normalize_seasonality(pattern)
+    assert score is not None
+    assert score > 0
 

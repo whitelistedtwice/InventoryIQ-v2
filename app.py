@@ -248,7 +248,7 @@ def _run_pipeline(df: pd.DataFrame) -> List[Dict[str, Any]]:
         return products
     for product_name, group in df.groupby("product"):
         last_row = group.iloc[-1]
-        demand_series = group["units_sold"].fillna(0)
+        demand_series = group.set_index("date")["units_sold"].fillna(0)
         demand_stats = calculate_demand_statistics(demand_series)
         trend_result = calculate_trend(demand_series)
         outlier_result = detect_outliers(demand_series)
