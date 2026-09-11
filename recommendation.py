@@ -113,6 +113,8 @@ def generate_recommendation(
         data_quality_issues.append("Target stock unavailable")
     if risk_result.risk_score is None:
         data_quality_issues.append("Product risk score unavailable")
+    if current_inventory is None:
+        data_quality_issues.append("Current inventory unavailable")
 
     if data_quality_issues:
         warnings.extend(data_quality_issues)
@@ -131,6 +133,7 @@ def generate_recommendation(
     stockout_signal = _safe_float(planning_result.stockout_probability) is not None and _safe_float(planning_result.stockout_probability) > 0.3
     excess_signal = excess_ratio is not None and excess_ratio > 0.2
     low_demand_signal = mean_demand is not None and mean_demand == 0
+    zero_demand_material_excess_signal = low_demand_signal and excess_units is not None and excess_units > 100.0
     high_volatility_signal = cv is not None and cv > 1.0
     increasing_trend_signal = trend == "INCREASING"
     decreasing_trend_signal = trend == "DECREASING"
@@ -184,6 +187,10 @@ def generate_recommendation(
         reasons.append("Demand is highly volatile but current coverage is adequate; monitor for sudden changes.")
         action = "MONITOR"
         priority = "MEDIUM"
+    elif zero_demand_material_excess_signal:
+        reasons.append("Mean demand is zero with positive excess inventory; no demand justifies holding excess stock.")
+        action = "REDUCE"
+        priority = "HIGH"
     elif low_demand_signal:
         reasons.append("Mean demand is zero; no stock movement justifies reordering.")
         action = "HOLD"
