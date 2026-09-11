@@ -133,6 +133,41 @@ def test_missing_values_ignored():
     assert result.max == pytest.approx(30.0)
 
 
+def test_zero_demand_days_count():
+    series = pd.Series([10.0, 0.0, 5.0, 0.0, 0.0, 8.0])
+    result = _stats(series)
+    assert result.zero_demand_days == 3
+    assert result.observation_count == 6
+
+
+def test_zero_demand_days_all_zero():
+    series = pd.Series([0.0, 0.0, 0.0])
+    result = _stats(series)
+    assert result.zero_demand_days == 3
+    assert result.observation_count == 3
+
+
+def test_zero_demand_days_none_zero():
+    series = pd.Series([5.0, 10.0, 15.0])
+    result = _stats(series)
+    assert result.zero_demand_days == 0
+    assert result.observation_count == 3
+
+
+def test_zero_demand_days_empty():
+    series = pd.Series([], dtype=float)
+    result = _stats(series)
+    assert result.zero_demand_days == 0
+    assert result.observation_count == 0
+
+
+def test_zero_demand_days_with_nan():
+    series = pd.Series([10.0, np.nan, 0.0, np.nan, 0.0])
+    result = _stats(series)
+    assert result.zero_demand_days == 2
+    assert result.observation_count == 3
+
+
 def test_trend_known_values_increasing():
     series = pd.Series([8.0, 10.0, 12.0])
     result = calculate_trend(series)
@@ -197,7 +232,58 @@ def test_trend_insufficient_data():
     result = calculate_trend(series)
     assert result.slope is None
     assert result.trend is None
+    assert result.trend_significant is None
     assert any("Insufficient observations" in warning for warning in result.warnings)
+
+
+def test_trend_significant_increasing():
+    series = pd.Series([8.0, 10.0, 12.0])
+    result = calculate_trend(series)
+    assert result.trend == "INCREASING"
+    assert result.trend_significant is True
+
+
+def test_trend_significant_decreasing():
+    series = pd.Series([12.0, 10.0, 8.0])
+    result = calculate_trend(series)
+    assert result.trend == "DECREASING"
+    assert result.trend_significant is True
+
+
+def test_trend_significant_stable():
+    series = pd.Series([10.0, 10.0, 10.0])
+    result = calculate_trend(series)
+    assert result.trend == "STABLE"
+    assert result.trend_significant is False
+
+
+def test_trend_significant_boundary_increasing():
+    series = pd.Series([9.4, 10.0, 10.6])
+    result = calculate_trend(series)
+    assert result.trend == "INCREASING"
+    assert result.trend_significant is True
+
+
+def test_trend_significant_boundary_decreasing():
+    series = pd.Series([10.6, 10.0, 9.4])
+    result = calculate_trend(series)
+    assert result.trend == "DECREASING"
+    assert result.trend_significant is True
+
+
+def test_trend_significant_stable_near_boundary():
+    series = pd.Series([9.6, 10.0, 10.4])
+    result = calculate_trend(series)
+    assert result.trend == "STABLE"
+    assert result.trend_significant is False
+
+
+def test_trend_significant_zero_mean():
+    series = pd.Series([0.0, 0.0, 0.0])
+    result = calculate_trend(series)
+    assert result.trend is None
+    assert result.trend_strength is None
+    assert result.trend_significant is None
 
 
 def test_outlier_iqr_known_values():

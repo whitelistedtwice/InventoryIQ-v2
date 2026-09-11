@@ -20,6 +20,7 @@ class DemandStatistics:
     max: Optional[float] = None
     volatility: Optional[str] = None
     observation_count: int = 0
+    zero_demand_days: int = 0
     warnings: List[str] = field(default_factory=list)
 
 
@@ -38,6 +39,8 @@ def calculate_demand_statistics(series: pd.Series) -> DemandStatistics:
     minimum = float(np.min(values))
     maximum = float(np.max(values))
 
+    zero_demand_days = int(np.sum(values == 0))
+
     if observation_count < 2:
         warnings.append(
             "Insufficient observations for sample standard deviation."
@@ -48,6 +51,7 @@ def calculate_demand_statistics(series: pd.Series) -> DemandStatistics:
             min=minimum,
             max=maximum,
             observation_count=observation_count,
+            zero_demand_days=zero_demand_days,
             warnings=warnings,
         )
 
@@ -79,6 +83,7 @@ def calculate_demand_statistics(series: pd.Series) -> DemandStatistics:
         max=maximum,
         volatility=volatility,
         observation_count=observation_count,
+        zero_demand_days=zero_demand_days,
         warnings=warnings,
     )
 
@@ -89,6 +94,7 @@ class TrendResult:
     intercept: Optional[float] = None
     trend_strength: Optional[float] = None
     trend: Optional[str] = None
+    trend_significant: Optional[bool] = None
     warnings: List[str] = field(default_factory=list)
 
 
@@ -124,11 +130,14 @@ def calculate_trend(series: pd.Series) -> TrendResult:
     else:
         trend = "STABLE"
 
+    trend_significant = trend in ("INCREASING", "DECREASING")
+
     return TrendResult(
         slope=float(slope),
         intercept=float(intercept),
         trend_strength=trend_strength,
         trend=trend,
+        trend_significant=trend_significant,
         warnings=warnings,
     )
 

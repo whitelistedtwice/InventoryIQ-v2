@@ -863,7 +863,8 @@ def _render_product_deep_dive(products: List[Dict[str, Any]]) -> None:
     if rec.evidence:
         st.markdown("**Evidence:**")
         for key, value in rec.evidence.items():
-            st.caption(f"• {key}: {value}")
+            display_value = "N/A" if value is None else value
+            st.caption(f"• {key}: {display_value}")
 
     st.divider()
 
