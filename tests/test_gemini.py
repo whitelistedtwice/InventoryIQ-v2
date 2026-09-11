@@ -14,6 +14,9 @@ from gemini import (
     GeminiFailure,
     GeminiResponse,
     ProductContext,
+    _build_executive_prompt,
+    _build_product_prompt,
+    _call_gemini,
     get_executive_summary,
     get_product_explanation,
 )
@@ -200,3 +203,233 @@ def test_executive_summary_request_defaults():
     assert request.overall_health_status is None
     assert request.total_products == 0
     assert request.products == []
+
+
+# --- Edge case: unexpected / malformed API responses ---
+
+
+def _mock_response_with_candidates(candidates):
+    mock_response = MagicMock()
+    mock_response.candidates = candidates
+    return mock_response
+
+
+@patch("gemini.is_gemini_configured", return_value=True)
+@patch("gemini._get_client")
+def test_gemini_none_candidates_returns_empty_text(mock_get_client, _mock_configured):
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = _mock_response_with_candidates(None)
+    mock_get_client.return_value = mock_client
+    result = get_executive_summary(ExecutiveSummaryRequest())
+    assert isinstance(result, GeminiResponse)
+    assert result.text == ""
+
+
+@patch("gemini.is_gemini_configured", return_value=True)
+@patch("gemini._get_client")
+def test_gemini_empty_candidates_returns_empty_text(mock_get_client, _mock_configured):
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = _mock_response_with_candidates([])
+    mock_get_client.return_value = mock_client
+    result = get_executive_summary(ExecutiveSummaryRequest())
+    assert isinstance(result, GeminiResponse)
+    assert result.text == ""
+
+
+@patch("gemini.is_gemini_configured", return_value=True)
+@patch("gemini._get_client")
+def test_gemini_none_content_returns_empty_text(mock_get_client, _mock_configured):
+    mock_candidate = MagicMock()
+    mock_candidate.content = None
+    mock_candidate.finish_reason = "STOP"
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = _mock_response_with_candidates([mock_candidate])
+    mock_get_client.return_value = mock_client
+    result = get_executive_summary(ExecutiveSummaryRequest())
+    assert isinstance(result, GeminiResponse)
+    assert result.text == ""
+
+
+@patch("gemini.is_gemini_configured", return_value=True)
+@patch("gemini._get_client")
+def test_gemini_none_parts_returns_empty_text(mock_get_client, _mock_configured):
+    mock_candidate = MagicMock()
+    mock_candidate.content.parts = None
+    mock_candidate.finish_reason = "STOP"
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = _mock_response_with_candidates([mock_candidate])
+    mock_get_client.return_value = mock_client
+    result = get_executive_summary(ExecutiveSummaryRequest())
+    assert isinstance(result, GeminiResponse)
+    assert result.text == ""
+
+
+@patch("gemini.is_gemini_configured", return_value=True)
+@patch("gemini._get_client")
+def test_gemini_empty_parts_returns_empty_text(mock_get_client, _mock_configured):
+    mock_candidate = MagicMock()
+    mock_candidate.content.parts = []
+    mock_candidate.finish_reason = "STOP"
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = _mock_response_with_candidates([mock_candidate])
+    mock_get_client.return_value = mock_client
+    result = get_executive_summary(ExecutiveSummaryRequest())
+    assert isinstance(result, GeminiResponse)
+    assert result.text == ""
+
+
+@patch("gemini.is_gemini_configured", return_value=True)
+@patch("gemini._get_client")
+def test_gemini_none_part_text_filtered_out(mock_get_client, _mock_configured):
+    mock_part_with_text = MagicMock()
+    mock_part_with_text.text = "Hello"
+    mock_part_no_text = MagicMock()
+    mock_part_no_text.text = None
+    mock_candidate = MagicMock()
+    mock_candidate.content.parts = [mock_part_no_text, mock_part_with_text]
+    mock_candidate.finish_reason = "STOP"
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = _mock_response_with_candidates([mock_candidate])
+    mock_get_client.return_value = mock_client
+    result = get_executive_summary(ExecutiveSummaryRequest())
+    assert isinstance(result, GeminiResponse)
+    assert result.text == "Hello"
+
+
+@patch("gemini.is_gemini_configured", return_value=True)
+@patch("gemini._get_client")
+def test_gemini_configuration_error_returns_failure(mock_get_client, _mock_configured):
+    mock_get_client.side_effect = ValueError("Missing API key")
+    result = get_executive_summary(ExecutiveSummaryRequest())
+    assert isinstance(result, GeminiFailure)
+    assert result.error_type == "configuration_error"
+    assert "Missing API key" in result.message
+
+
+@patch("gemini.is_gemini_configured", return_value=True)
+@patch("gemini._get_client")
+def test_gemini_product_explanation_api_failure_returns_failure(mock_get_client, _mock_configured):
+    mock_get_client.side_effect = RuntimeError("Network error")
+    result = get_product_explanation(ProductContext(product="Widget A", category="General"))
+    assert isinstance(result, GeminiFailure)
+    assert result.error_type == "gemini_api_error"
+    assert "Gemini request failed" in result.message
+    assert "Network error" in (result.details or "")
+
+
+# --- Prompt contract tests ---
+
+
+def test_executive_prompt_contains_no_override_clause():
+    prompt = _build_executive_prompt(ExecutiveSummaryRequest(
+        overall_health_status="ATTENTION",
+        overall_risk_score=55.0,
+        total_products=10,
+        products_at_risk=3,
+    ))
+    assert "Do not calculate or modify any numbers" in prompt
+    assert "Do not invent" in prompt
+
+
+def test_product_prompt_contains_no_override_clause():
+    context = ProductContext(
+        product="Widget A",
+        category="General",
+        mean_demand=10.0,
+        cv=0.3,
+        risk_score=65.0,
+        risk_level="MEDIUM",
+        recommendation_action="REORDER",
+        recommendation_priority="HIGH",
+    )
+    prompt = _build_product_prompt(context)
+    assert "Do not calculate or modify any numbers" in prompt
+    assert "Do not invent facts" in prompt
+
+
+def test_executive_prompt_includes_verified_fields():
+    request = ExecutiveSummaryRequest(
+        overall_health_status="ATTENTION",
+        overall_risk_score=55.0,
+        total_products=10,
+        products_at_risk=3,
+        high_risk_categories=1,
+        total_categories=2,
+        total_stockout_exposure=500.0,
+        total_excess_inventory_value=200.0,
+        total_capital_tied_up=1000.0,
+        total_revenue_at_risk=300.0,
+        total_profit_at_risk=150.0,
+        category_risk_levels=["MEDIUM", "HIGH"],
+        products=[ProductContext(product="Widget A", category="General", risk_score=65.0, risk_level="MEDIUM")],
+    )
+    prompt = _build_executive_prompt(request)
+    assert "ATTENTION" in prompt
+    assert "55.0" in prompt
+    assert "10" in prompt
+    assert "500.0" in prompt
+    assert "Widget A" in prompt
+
+
+def test_product_prompt_includes_verified_fields():
+    context = ProductContext(
+        product="Widget A",
+        category="General",
+        mean_demand=10.0,
+        cv=0.3,
+        trend="INCREASING",
+        current_inventory=40.0,
+        days_remaining=4.0,
+        lead_time_days=7.0,
+        safety_stock=15.0,
+        reorder_point=85.0,
+        reorder_quantity=45.0,
+        stockout_probability=0.8,
+        excess_units=0.0,
+        excess_inventory_value=0.0,
+        revenue_at_risk=200.0,
+        profit_at_risk=100.0,
+        risk_score=75.0,
+        risk_level="HIGH",
+        recommendation_action="REORDER",
+        recommendation_priority="HIGH",
+        recommendation_reasons=["Low coverage"],
+    )
+    prompt = _build_product_prompt(context)
+    assert "Widget A" in prompt
+    assert "INCREASING" in prompt
+    assert "10.0" in prompt
+    assert "40.0" in prompt
+    assert "REORDER" in prompt
+
+
+def test_executive_prompt_no_raw_csv_content():
+    request = ExecutiveSummaryRequest(
+        overall_health_status="ATTENTION",
+        overall_risk_score=55.0,
+        total_products=10,
+        products_at_risk=3,
+        products=[ProductContext(product="Widget A", category="General", risk_score=65.0, risk_level="MEDIUM")],
+    )
+    prompt = _build_executive_prompt(request)
+    lower = prompt.lower()
+    assert "csv" not in lower
+    assert "raw data" not in lower
+    assert "units_sold" not in lower
+    assert "unit_cost" not in lower
+
+
+# --- Deterministic configuration tests ---
+
+
+@patch("gemini.is_gemini_configured", return_value=True)
+@patch("gemini._get_client")
+def test_gemini_uses_deterministic_temperature_and_tokens(mock_get_client, _mock_configured):
+    mock_client = _mock_genai_client()
+    mock_get_client.return_value = mock_client
+    get_executive_summary(ExecutiveSummaryRequest())
+    call_kwargs = mock_client.models.generate_content.call_args[1]
+    assert "config" in call_kwargs
+    config = call_kwargs["config"]
+    assert config.temperature == 0.2
+    assert config.max_output_tokens == 512

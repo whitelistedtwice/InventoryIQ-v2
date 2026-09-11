@@ -17,6 +17,7 @@ from analysis import (
     calculate_trend,
     detect_outliers,
 )
+from data_processing import process_data
 from gemini import ExecutiveSummaryRequest, GeminiFailure, GeminiResponse, ProductContext, get_executive_summary, get_product_explanation
 from gemini_config import is_gemini_configured
 from recommendation import RecommendationResult, generate_recommendation
@@ -177,6 +178,8 @@ def _init_session_state() -> None:
         "scenario_result": None,
         "ai_brief": None,
         "ai_brief_error": None,
+        "ai_brief_signature": None,
+        "ai_explanations": {},
         "navigate_to": None,
     }
     for key, value in defaults.items():
@@ -407,6 +410,11 @@ def _render_ai_brief(products: List[Dict[str, Any]]) -> None:
     if not is_gemini_configured():
         st.warning("Gemini API key is not configured. AI brief is unavailable. Configure `GEMINI_API_KEY` to enable this section.")
         return
+    current_signature = (len(products), tuple(sorted(p["product"] for p in products)))
+    if st.session_state.ai_brief_signature != current_signature:
+        st.session_state.ai_brief = None
+        st.session_state.ai_brief_error = None
+        st.session_state.ai_brief_signature = current_signature
     if st.session_state.ai_brief is None and st.session_state.ai_brief_error is None:
         category_results = calculate_category_risk([
             {
@@ -478,7 +486,8 @@ def _render_ai_brief(products: List[Dict[str, Any]]) -> None:
             products=product_contexts,
         )
         try:
-            response = get_executive_summary(request)
+            with st.spinner("Generating AI business brief..."):
+                response = get_executive_summary(request)
             if isinstance(response, GeminiFailure):
                 st.session_state.ai_brief_error = response.message
             elif isinstance(response, GeminiResponse):
@@ -494,9 +503,6 @@ def _render_ai_brief(products: List[Dict[str, Any]]) -> None:
         bullets = [line.strip() for line in st.session_state.ai_brief.splitlines() if line.strip()]
         for bullet in bullets[:8]:
             st.caption(f"• {bullet}")
-    else:
-        with st.spinner("Generating AI business brief..."):
-            st.empty()
 
 
 def _render_product_explorer(products: List[Dict[str, Any]]) -> None:
@@ -861,46 +867,59 @@ def _render_product_deep_dive(products: List[Dict[str, Any]]) -> None:
 
     st.divider()
 
-    # Gemini button (UI element only)
-    if st.button("Ask Gemini for explanation", key=f"gemini_{selected}"):
-        if not is_gemini_configured():
-            st.warning("Gemini API key is not configured.")
+    if selected not in st.session_state.ai_explanations:
+        if st.button("Ask Gemini for explanation", key=f"gemini_{selected}"):
+            if not is_gemini_configured():
+                st.session_state.ai_explanations[selected] = {
+                    "error": "Gemini API key is not configured. Configure `GEMINI_API_KEY` to enable AI explanations."
+                }
+            else:
+                context = ProductContext(
+                    product=product["product"],
+                    category=product["category"],
+                    mean_demand=_safe_float(product["demand_stats"].mean),
+                    cv=_safe_float(product["demand_stats"].cv),
+                    trend=product["trend_result"].trend,
+                    trend_strength=_safe_float(product["trend_result"].trend_strength),
+                    current_inventory=_safe_float(product["current_inventory"]),
+                    days_remaining=_safe_float(product["planning"].days_remaining),
+                    lead_time_days=_safe_float(product.get("lead_time_days")),
+                    safety_stock=_safe_float(product["planning"].safety_stock),
+                    reorder_point=_safe_float(product["planning"].reorder_point),
+                    reorder_quantity=_safe_float(product["planning"].reorder_quantity),
+                    stockout_probability=_safe_float(product["planning"].stockout_probability),
+                    excess_units=_safe_float(product["financial"].excess_units),
+                    excess_inventory_value=_safe_float(product["financial"].excess_inventory_value),
+                    revenue_at_risk=_safe_float(product["financial"].revenue_at_risk),
+                    profit_at_risk=_safe_float(product["financial"].profit_at_risk),
+                    risk_score=_safe_float(product["risk"].risk_score),
+                    risk_level=product["risk"].risk_level,
+                    recommendation_action=rec.action,
+                    recommendation_priority=rec.priority,
+                    recommendation_reasons=rec.reasons,
+                    recommendation_evidence=rec.evidence,
+                )
+                with st.spinner("Generating Gemini explanation..."):
+                    try:
+                        explanation = get_product_explanation(context)
+                        if isinstance(explanation, GeminiFailure):
+                            st.session_state.ai_explanations[selected] = {"error": explanation.message}
+                        elif isinstance(explanation, GeminiResponse):
+                            st.session_state.ai_explanations[selected] = {"text": explanation.text}
+                        else:
+                            st.session_state.ai_explanations[selected] = {"text": getattr(explanation, "text", "")}
+                    except Exception as exc:
+                        st.session_state.ai_explanations[selected] = {"error": str(exc)}
+                st.rerun()
+    else:
+        cached = st.session_state.ai_explanations[selected]
+        if "error" in cached:
+            st.warning(f"Gemini explanation unavailable: {cached['error']}")
         else:
-            context = ProductContext(
-                product=product["product"],
-                category=product["category"],
-                mean_demand=_safe_float(product["demand_stats"].mean),
-                cv=_safe_float(product["demand_stats"].cv),
-                trend=product["trend_result"].trend,
-                trend_strength=_safe_float(product["trend_result"].trend_strength),
-                current_inventory=_safe_float(product["current_inventory"]),
-                days_remaining=_safe_float(product["planning"].days_remaining),
-                lead_time_days=_safe_float(product.get("lead_time_days")),
-                safety_stock=_safe_float(product["planning"].safety_stock),
-                reorder_point=_safe_float(product["planning"].reorder_point),
-                reorder_quantity=_safe_float(product["planning"].reorder_quantity),
-                stockout_probability=_safe_float(product["planning"].stockout_probability),
-                excess_units=_safe_float(product["financial"].excess_units),
-                excess_inventory_value=_safe_float(product["financial"].excess_inventory_value),
-                revenue_at_risk=_safe_float(product["financial"].revenue_at_risk),
-                profit_at_risk=_safe_float(product["financial"].profit_at_risk),
-                risk_score=_safe_float(product["risk"].risk_score),
-                risk_level=product["risk"].risk_level,
-                recommendation_action=rec.action,
-                recommendation_priority=rec.priority,
-                recommendation_reasons=rec.reasons,
-                recommendation_evidence=rec.evidence,
-            )
-            try:
-                explanation = get_product_explanation(context)
-                if isinstance(explanation, GeminiFailure):
-                    st.warning(f"Gemini explanation unavailable: {explanation.message}")
-                elif isinstance(explanation, GeminiResponse):
-                    st.info(explanation.text)
-                else:
-                    st.info(getattr(explanation, "text", ""))
-            except Exception as exc:
-                st.error(f"Gemini explanation failed: {exc}")
+            st.info(cached["text"])
+        if st.button("Regenerate Gemini explanation", key=f"gemini_regen_{selected}"):
+            del st.session_state.ai_explanations[selected]
+            st.rerun()
 
 
 def _render_historical_analysis(products: List[Dict[str, Any]], filtered_df: pd.DataFrame) -> None:
