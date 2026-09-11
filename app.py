@@ -989,6 +989,12 @@ def _render_what_if_scenarios(products: List[Dict[str, Any]]) -> None:
     selected = st.selectbox("Select a product", product_names, index=0 if product_names else None, key="scenario_product")
     if not selected:
         return
+
+    last_product = st.session_state.get("scenario_product_name")
+    if last_product is not None and last_product != selected:
+        st.session_state.scenario_result = None
+    st.session_state.scenario_product_name = selected
+
     product = next((p for p in products if p["product"] == selected), None)
     if not product:
         return
@@ -1058,8 +1064,12 @@ def _render_what_if_scenarios(products: List[Dict[str, Any]]) -> None:
             st.metric("Risk Score", f"{_safe_float(scen.risk.risk_score):.1f}" if _safe_float(scen.risk.risk_score) is not None else "N/A", delta=_format_delta(deltas.risk_score))
 
         st.markdown("**Causal Chain**")
-        st.caption(f"Demand change: {demand_change:+d}% → scenario mean demand = {_safe_float(scen.planning.lead_time_demand):.1f if _safe_float(scen.planning.lead_time_demand) is not None else 'N/A'} units")
-        st.caption(f"Lead time change: {lead_time_change:+d} days → scenario lead time = {_safe_float(product.get('lead_time_days')) + lead_time_change if _safe_float(product.get('lead_time_days')) is not None else 'N/A'} days")
+        mean_demand = _safe_float(product["demand_stats"].mean) or 0.0
+        lead_time_days = _safe_float(product.get("lead_time_days"))
+        scenario_mean_demand = mean_demand * (1 + demand_change / 100)
+        scenario_lead_time = (lead_time_days + lead_time_change) if lead_time_days is not None else None
+        st.caption(f"Demand change: {demand_change:+d}% → scenario mean demand = {scenario_mean_demand:.1f} units")
+        st.caption(f"Lead time change: {lead_time_change:+d} days → scenario lead time = {scenario_lead_time if scenario_lead_time is not None else 'N/A'} days")
         if deltas.risk_score is not None:
             direction = "increases" if deltas.risk_score > 0 else "decreases" if deltas.risk_score < 0 else "unchanged"
             st.caption(f"Risk score {direction} by {abs(deltas.risk_score):.1f} points under this scenario.")
