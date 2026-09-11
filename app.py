@@ -348,7 +348,8 @@ def _render_inventory_health(products: List[Dict[str, Any]]) -> None:
     with col6:
         revenue = overall.total_revenue_at_risk
         profit = overall.total_profit_at_risk
-        st.metric("Estimated Revenue / Profit Risk", f"{_format_currency(revenue)} / {_format_currency(profit)}")
+        st.metric("Estimated Revenue at Risk", _format_currency(revenue))
+        st.metric("Estimated Profit at Risk", _format_currency(profit))
 
 
 def _render_top_priorities(products: List[Dict[str, Any]]) -> None:
@@ -395,10 +396,10 @@ def _render_top_priorities(products: List[Dict[str, Any]]) -> None:
                     st.metric("Est. Reorder Qty", f"{item['reorder_quantity']:.1f}", help="Estimated reorder quantity from backend planning")
                 stockout_prob = item.get("evidence", {}).get("stockout_probability")
                 if stockout_prob is not None:
-                    st.caption(f"Stockout prob: {_format_percent(stockout_prob)}")
+                    st.caption(f"Est. Stockout Prob: {_format_percent(stockout_prob)}")
                 excess_units = item.get("evidence", {}).get("excess_units")
                 if excess_units is not None and excess_units > 0:
-                    st.caption(f"Excess units: {excess_units:.1f}")
+                    st.caption(f"Est. Excess Units: {excess_units:.1f}")
             st.divider()
 
 
@@ -675,8 +676,8 @@ def _render_category_analysis(products: List[Dict[str, Any]]) -> None:
             "Risk Level": risk_level,
             "Inventory Value": _format_currency(result.category_inventory_value),
             "Capital Tied Up": _format_currency(result.category_capital_tied_up),
-            "Stockout Exposure": _format_currency(result.category_stockout_exposure),
-            "Excess Inventory": _format_currency(result.category_excess_inventory_value),
+            "Est. Stockout Exposure": _format_currency(result.category_stockout_exposure),
+            "Est. Excess Inventory": _format_currency(result.category_excess_inventory_value),
             "Demand Volatility": f"{result.category_demand_volatility:.2f}" if result.category_demand_volatility is not None else "N/A",
         })
 
@@ -693,7 +694,7 @@ def _render_category_analysis(products: List[Dict[str, Any]]) -> None:
         st.dataframe(results_df[display_cols], use_container_width=True, hide_index=True)
     with col2:
         st.markdown("**Financial Metrics by Category**")
-        financial_cols = ["Category", "Inventory Value", "Capital Tied Up", "Stockout Exposure", "Excess Inventory"]
+        financial_cols = ["Category", "Inventory Value", "Capital Tied Up", "Est. Stockout Exposure", "Est. Excess Inventory"]
         st.dataframe(results_df[financial_cols], use_container_width=True, hide_index=True)
 
     st.markdown("**Category Risk Comparison**")
@@ -702,7 +703,8 @@ def _render_category_analysis(products: List[Dict[str, Any]]) -> None:
         chart_data["Category Risk"] = pd.to_numeric(chart_data["Category Risk"], errors="coerce")
         chart_data = chart_data.dropna(subset=["Category Risk"])
         if not chart_data.empty:
-            st.bar_chart(chart_data.set_index("Category")["Category Risk"])
+            chart_data = chart_data.set_index("Category")
+            st.bar_chart(chart_data["Category Risk"], y_label="Category Risk Score (0-100)")
 
 
 def _render_product_deep_dive(products: List[Dict[str, Any]]) -> None:
@@ -813,7 +815,7 @@ def _render_product_deep_dive(products: List[Dict[str, Any]]) -> None:
     with col3:
         st.caption("**Stockout Risk**")
         stockout_prob = _safe_float(product["planning"].stockout_probability)
-        st.metric("Stockout Probability", _format_percent(stockout_prob))
+        st.metric("Est. Stockout Probability", _format_percent(stockout_prob))
 
     inventory_history = product.get("inventory_history", [])
     if inventory_history:
@@ -839,15 +841,15 @@ def _render_product_deep_dive(products: List[Dict[str, Any]]) -> None:
         st.caption("**Excess**")
         excess_units = _safe_float(product["financial"].excess_units)
         excess_value = _safe_float(product["financial"].excess_inventory_value)
-        st.metric("Excess Units", f"{excess_units:.1f}" if excess_units is not None else "N/A")
-        st.metric("Excess Value", _format_currency(excess_value))
+        st.metric("Est. Excess Units", f"{excess_units:.1f}" if excess_units is not None else "N/A")
+        st.metric("Est. Excess Value", _format_currency(excess_value))
     with col3:
         st.caption("**Revenue / Profit Exposure**")
         revenue = _safe_float(product["financial"].revenue_at_risk)
         profit = _safe_float(product["financial"].profit_at_risk)
         gross_margin = _safe_float(product["financial"].gross_margin)
-        st.metric("Revenue at Risk", _format_currency(revenue))
-        st.metric("Profit at Risk", _format_currency(profit))
+        st.metric("Est. Revenue at Risk", _format_currency(revenue))
+        st.metric("Est. Profit at Risk", _format_currency(profit))
         st.metric("Gross Margin", _format_percent(gross_margin))
 
     st.divider()
