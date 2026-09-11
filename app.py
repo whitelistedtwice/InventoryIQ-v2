@@ -1127,7 +1127,7 @@ def main() -> None:
             st.write(f"- {err}")
         st.stop()
 
-    processed_df = validation.df.copy()
+    processed_df = process_data(validation.df)
     date_range, categories, product_search = _render_sidebar(processed_df)
     filtered_df = _apply_filters(processed_df, date_range, categories, product_search)
     if filtered_df.empty:
